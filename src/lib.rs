@@ -13,12 +13,15 @@
 //! - [`health`] is `cookie burnt`.
 
 pub mod apk;
+pub mod assets;
 pub mod backend;
 pub mod cli;
 pub mod commands;
 pub mod cpk;
+pub mod desktop;
 pub mod health;
 pub mod jar;
+pub mod notify;
 pub mod paths;
 pub mod system;
 pub mod ui;
@@ -55,5 +58,6 @@ pub fn run(cli: Cli) -> Result<i32> {
             commands::toss::run(args, backend_name)?;
             Ok(0)
         }
+        Command::Kitchen(args) => commands::kitchen::run(args, backend_name),
     }
 }

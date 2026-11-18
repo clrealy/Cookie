@@ -8,6 +8,7 @@
 use anyhow::Result;
 
 use crate::backend::{AndroidBackend, OvenState};
+use crate::desktop::{self, DesktopDirs};
 use crate::jar;
 use crate::system::{self, InitSystem};
 use crate::ui::{self, Level};
@@ -87,6 +88,7 @@ pub fn run(backend: &dyn AndroidBackend) -> Result<Report> {
         check_backend(backend),
         check_oven(backend),
         check_arm_translation(backend),
+        check_desktop_integration(),
     ];
 
     Ok(Report { checks })
@@ -379,6 +381,61 @@ fn check_arm_translation(backend: &dyn AndroidBackend) -> Check {
             err.to_string(),
         ),
     }
+}
+
+/// Is the desktop set up to open cookies?
+///
+/// Never a failure: everything still works from a terminal without it.
+fn check_desktop_integration() -> Check {
+    let dirs = match DesktopDirs::user() {
+        Ok(dirs) => dirs,
+        Err(err) => {
+            return Check::warn(
+                "desktop integration",
+                "could not be checked",
+                err.to_string(),
+            )
+        }
+    };
+
+    let status = desktop::status(&dirs);
+    let menu = format!(
+        "{} app{} in your menu",
+        status.launchers,
+        if status.launchers == 1 { "" } else { "s" }
+    );
+
+    if status.is_ready() {
+        return Check::ok("desktop integration", menu);
+    }
+
+    let missing = [
+        (
+            !status.mime_registered,
+            "the .cpk file type is not registered",
+        ),
+        (
+            !status.handler_installed,
+            "Cookie is not installed as a file handler",
+        ),
+        (
+            status.mime_registered && status.handler_installed && !status.is_default_handler,
+            "Cookie is not the default application for .cpk files",
+        ),
+    ]
+    .iter()
+    .filter(|(missing, _)| *missing)
+    .map(|(_, what)| *what)
+    .collect::<Vec<_>>()
+    .join(", ");
+
+    Check::warn(
+        "desktop integration",
+        missing,
+        "Double-clicking a cookie will not work until this is set up. \
+         Everything still works from a terminal.\n\
+         Set it up with:\n  cookie kitchen setup",
+    )
 }
 
 /// Print a report.

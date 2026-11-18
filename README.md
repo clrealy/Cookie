@@ -14,14 +14,15 @@ One app, one ordinary desktop window. No Android home screen in the way.
 
 > ## ⚠️ Work in progress — nothing here is finished
 >
-> Cookie is at **milestone 1 of 4**. Today it is a friendlier front end over
+> Cookie is at **milestone 2 of 4**. Today it is a friendlier front end over
 > [Waydroid](https://waydro.id/), which does the actual Android running. The
-> commands work, the `.cpk` format is real, and `cookie burnt` will tell you
-> honestly what your machine is missing.
+> commands work, the `.cpk` format is real, double-clicking a cookie runs it,
+> installed apps appear in your application menu, and `cookie burnt` will tell
+> you honestly what your machine is missing.
 >
-> **What does not exist yet:** double-clicking a `.cpk` (milestone 2),
-> in-place updates (milestone 3), and Cookie's own runtime — the oven —
-> replacing Waydroid (milestone 4).
+> **What does not exist yet:** in-place updates that keep your app data
+> (milestone 3), and Cookie's own runtime — the oven — replacing Waydroid
+> (milestone 4).
 >
 > Expect rough edges. Expect the `.cpk` format to gain fields. Do not put
 > anything you care about in here yet.
@@ -95,10 +96,15 @@ sudo install -Dm755 target/release/cookie /usr/local/bin/cookie
 sudo waydroid init          # downloads the Android image; add -s GAPPS if you want Google apps
 cookie burnt                # check everything is in place
 cookie oven start           # warm up the runtime
+cookie kitchen setup        # teach your desktop about .cpk files
 ```
 
 `waydroid init` is the one step that genuinely needs root, which is why Cookie
 asks you to run it yourself rather than calling `sudo` behind your back.
+`cookie kitchen setup` needs no root at all — everything it writes goes under
+your own home directory.
+
+Packaging Cookie for a distribution instead? See **[dist/README.md](dist/README.md)**.
 
 ---
 
@@ -131,13 +137,18 @@ cookie bake teapot.apk --force                      # overwrite an existing cook
 ### `cookie eat` — install if needed, then run
 
 ```sh
-cookie eat teapot.cpk              # install (if new) and launch
-cookie eat teapot.cpk --no-launch  # install only
-cookie eat teapot.cpk --reinstall  # install again even if it is already there
+cookie eat teapot.cpk               # install (if new) and launch
+cookie eat Teapot                   # an app already in the jar, by name
+cookie eat com.example.teapot       # or by package id
+cookie eat teapot.cpk --no-launch   # install only
+cookie eat teapot.cpk --reinstall   # install again even if it is already there
+cookie eat teapot.cpk --no-launcher # skip the application-menu entry
 ```
 
-Warms the oven for you if it is cold, and turns on one-window-per-app mode
-before launching.
+Warms the oven for you if it is cold, turns on one-window-per-app mode, and
+adds the app to your application menu with its own icon.
+
+This is also what runs when you double-click a `.cpk` in your file manager.
 
 ### `cookie jar` — what is installed
 
@@ -225,6 +236,55 @@ cookie toss Teapot        # asks first
 cookie toss Teapot --yes  # does not
 ```
 
+Removes the app from Android, its entry from the jar, and its launcher and
+icon from your application menu. If the oven is not running, or Waydroid is
+not even installed, the jar and menu entries still go — you are never stuck
+with something you cannot get rid of.
+
+### `cookie kitchen` — desktop integration
+
+```sh
+cookie kitchen setup              # register everything (this is the one you want)
+cookie kitchen status             # what is currently registered
+cookie kitchen remove             # undo it
+cookie kitchen remove --launchers # undo it, app menu entries included
+```
+
+`setup` does four things, all under your home directory and none needing root:
+
+- registers the `application/x-cookie-package` MIME type
+- installs Cookie as the handler, so a double-clicked `.cpk` runs `cookie eat`
+- installs Cookie's icons, so cookies get a cookie in your file manager
+- builds an application-menu entry for everything already in the jar
+
+Run it again any time — it is idempotent, and it re-points menu entries if you
+have moved the `cookie` binary.
+
+---
+
+## How a double-click knows it is a cookie
+
+Not by the file extension. `.cpk` is not ours alone — several games use it for
+unrelated archive formats — so Cookie's MIME definition carries **no filename
+glob**. It identifies a cookie by looking inside: zip magic, then the literal
+`manifest.toml` as the first entry's name. That is why `cookie bake` always
+writes `manifest.toml` first.
+
+Measured against `update-mime-database` and `gio info`, the same stack Dolphin
+uses:
+
+| File | Detected as |
+|---|---|
+| a cookie named `teapot.cpk` | 🍪 `application/x-cookie-package` |
+| a cookie with **no extension at all** | 🍪 `application/x-cookie-package` |
+| an unrelated zip named `impostor.cpk` | `application/zip` — correctly left alone |
+| an empty file named `empty.cpk` | `application/x-zerosize` |
+| a cookie renamed `teapot.zip` | `application/zip` |
+
+That last row is the price. A file named `.zip` being treated as a zip is
+reasonable; claiming someone else's `.cpk` and breaking their double-click is
+not.
+
 ---
 
 ## Where things live
@@ -237,6 +297,16 @@ writes needs root.
 | `~/.local/share/cookie/jar/<package>/` | One directory per installed app: its manifest, icon and install record |
 | `~/.cache/cookie/scratch/` | Scratch space while baking and installing; cleaned up automatically |
 | `~/.cache/cookie/logs/oven.log` | Output from the last `cookie oven start` |
+| `~/.local/share/applications/cookie.desktop` | The handler that opens `.cpk` files |
+| `~/.local/share/applications/cookie-<package>.desktop` | One menu entry per installed app |
+| `~/.local/share/mime/packages/cookie.xml` | The `.cpk` file type definition |
+| `~/.local/share/icons/hicolor/` | Cookie's icon, and each app's |
+| `~/.config/mimeapps.list` | Which application opens a `.cpk` |
+
+Every one of those is written by `cookie kitchen setup` and removed by
+`cookie kitchen remove`. Cookie only ever deletes `.desktop` files carrying
+its own `X-Cookie-Managed=true` marker, so a file of yours that happens to
+share the naming is left alone.
 
 ---
 
@@ -267,8 +337,8 @@ The full specification is in **[docs/cpk-spec.md](docs/cpk-spec.md)**.
 | | Milestone | State |
 |---|---|---|
 | **1** | `bake`, `eat`, `jar`, `crumbs`, `burnt`, `oven`, `toss` on a Waydroid backend | ✅ done |
-| **2** | `application/x-cookie-package` MIME type, `.desktop` launchers with icons, double-click to run | ⬜ next |
-| **3** | In-place updates that keep app data when signatures match, and warn loudly when they do not | ⬜ |
+| **2** | `application/x-cookie-package` MIME type, `.desktop` launchers with icons, double-click to run | ✅ done |
+| **3** | In-place updates that keep app data when signatures match, and warn loudly when they do not | ⬜ next |
 | **4** | **The oven**: Cookie's own runtime — container setup, binderfs mounting, one shared Android image — replacing Waydroid | ⬜ |
 
 The backend already sits behind a trait (`AndroidBackend`), so milestone 4 is
@@ -279,10 +349,18 @@ a new implementation rather than a rewrite.
 ## Development
 
 ```sh
-cargo test                              # 108 tests
+cargo test                              # 168 tests
 cargo clippy --all-targets              # clean
+cargo fmt --check                       # clean
 python3 tests/fixtures/make_fixtures.py # regenerate the test APKs
+
+# after changing what kitchen setup writes:
+COOKIE_REGENERATE_DIST=1 cargo test --test dist_files
 ```
+
+The files in `dist/` are what a distribution package installs system-wide.
+They are generated from the same code `cookie kitchen setup` uses, and a test
+fails if the two ever drift apart.
 
 The fixtures in `tests/fixtures/` are structurally real APKs — genuine zip
 layout, genuine Android binary XML — built by a script that implements the
@@ -294,6 +372,8 @@ executable code.
 
 - No `unwrap()` or `expect()` on any path a user can reach. Tests may.
 - Every error says what went wrong **and** what to do about it.
+- Metadata from an APK is untrusted input. It gets escaped before it reaches a
+  `.desktop` file, and sanitised before it becomes part of a filename.
 - Never assume systemd.
 - `sudo` only when it is genuinely required, and always with the reason.
 - Cookie reads files the user gives it. It downloads nothing.

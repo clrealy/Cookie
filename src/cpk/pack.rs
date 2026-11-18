@@ -19,7 +19,7 @@ use crate::util;
 
 /// Cookie's own icon, used when an APK hides its launcher icon behind a
 /// resource reference we cannot resolve.
-const FALLBACK_ICON: &[u8] = include_bytes!("../../assets/cookie-icon.png");
+use crate::assets::COOKIE_ICON_256 as FALLBACK_ICON;
 
 /// How a set of APKs was sorted out into a base plus splits.
 #[derive(Debug)]
@@ -147,24 +147,71 @@ pub fn bake(sorted: &Sorted, name_override: Option<&str>, out: &Path) -> Result<
         paths::ensure_dir(parent)?;
     }
 
+    // Hash every APK before opening the archive. This costs no extra I/O —
+    // the digest was always a separate read — and it means `manifest.toml`
+    // can be complete before a single byte of APK is written.
     let mut files: BTreeMap<String, String> = BTreeMap::new();
-    let result = (|| -> Result<CpkManifest> {
+    for (source, entry) in &planned {
+        files.insert(entry.clone(), apk::file_digest(source)?);
+    }
+
+    let manifest = CpkManifest {
+        cpk_version: CPK_FORMAT_VERSION,
+        cookie: CookieMeta {
+            name: name.clone(),
+            package: base.manifest.package.clone(),
+            version_name: base.manifest.version_name.clone(),
+            version_code: base.manifest.version_code,
+            abis: abis.clone(),
+            icon: icon_entry.clone(),
+            min_sdk: base.manifest.min_sdk,
+            target_sdk: base.manifest.target_sdk,
+            launchable_activity: base.manifest.launchable_activity.clone(),
+        },
+        baked: BakedMeta {
+            by: format!("cookie {}", env!("CARGO_PKG_VERSION")),
+            at: util::iso8601_utc(util::now_unix()),
+            base_apk: base_entry.clone(),
+            splits: planned
+                .iter()
+                .map(|(_, e)| e.clone())
+                .filter(|e| e != &base_entry)
+                .collect(),
+            signature_sha256: apk::signing_digest(&base.path)?,
+            files,
+        },
+    };
+
+    let result = (|| -> Result<()> {
         let file = File::create(&tmp_path)
             .with_context(|| format!("cannot create {}", tmp_path.display()))?;
         let mut zip = zip::ZipWriter::new(BufWriter::new(file));
 
         // APKs and icons are already compressed. Storing them keeps baking
-        // fast and the result barely larger, and leaves the APKs readable at
-        // a fixed offset for anything that wants to stream them.
+        // fast and the result barely larger, and leaves each APK readable at
+        // a fixed offset for anything that wants to stream it.
         let stored = SimpleFileOptions::default()
             .compression_method(CompressionMethod::Stored)
             .large_file(true);
         let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
 
-        // Order is not load-bearing: a zip's central directory gives every
-        // entry's offset, so `manifest.toml` and `icon.png` are read with a
-        // single seek however large the APKs beside them are. That property
-        // is the reason the format is a zip rather than a tarball.
+        // `manifest.toml` goes first, and that position is part of the format.
+        //
+        // Reading a cookie never depends on it — a zip's central directory
+        // gives every entry's offset, so any member is one seek away however
+        // large the archive is. Desktop file-type detection does depend on it:
+        // the shared-mime-info magic rule identifies a cookie by finding
+        // `manifest.toml` as the name in the first local file header, at
+        // offset 30. Written last, a cookie would only ever be recognised by
+        // its extension.
+        let toml = manifest
+            .to_toml()
+            .context("cannot serialise manifest.toml")?;
+        zip.start_file(MANIFEST_ENTRY, deflated)
+            .context("cannot add manifest.toml to the cookie")?;
+        zip.write_all(toml.as_bytes())
+            .context("cannot write manifest.toml")?;
+
         if let (Some(bytes), Some(entry)) = (&icon_bytes, &icon_entry) {
             zip.start_file(entry.as_str(), stored)
                 .with_context(|| format!("cannot add {entry} to the cookie"))?;
@@ -187,51 +234,15 @@ pub fn bake(sorted: &Sorted, name_override: Option<&str>, out: &Path) -> Result<
             );
             std::io::copy(&mut reader, &mut zip)
                 .with_context(|| format!("cannot copy {} into the cookie", source.display()))?;
-            files.insert(entry.clone(), apk::file_digest(source)?);
         }
-
-        let manifest = CpkManifest {
-            cpk_version: CPK_FORMAT_VERSION,
-            cookie: CookieMeta {
-                name: name.clone(),
-                package: base.manifest.package.clone(),
-                version_name: base.manifest.version_name.clone(),
-                version_code: base.manifest.version_code,
-                abis: abis.clone(),
-                icon: icon_entry.clone(),
-                min_sdk: base.manifest.min_sdk,
-                target_sdk: base.manifest.target_sdk,
-                launchable_activity: base.manifest.launchable_activity.clone(),
-            },
-            baked: BakedMeta {
-                by: format!("cookie {}", env!("CARGO_PKG_VERSION")),
-                at: util::iso8601_utc(util::now_unix()),
-                base_apk: base_entry.clone(),
-                splits: planned
-                    .iter()
-                    .map(|(_, e)| e.clone())
-                    .filter(|e| e != &base_entry)
-                    .collect(),
-                signature_sha256: apk::signing_digest(&base.path)?,
-                files,
-            },
-        };
-
-        let toml = manifest
-            .to_toml()
-            .context("cannot serialise manifest.toml")?;
-        zip.start_file(MANIFEST_ENTRY, deflated)
-            .context("cannot add manifest.toml to the cookie")?;
-        zip.write_all(toml.as_bytes())
-            .context("cannot write manifest.toml")?;
 
         let mut inner = zip.finish().context("cannot finalise the cookie archive")?;
         inner.flush().context("cannot flush the cookie archive")?;
-        Ok(manifest)
+        Ok(())
     })();
 
     match result {
-        Ok(manifest) => {
+        Ok(()) => {
             fs::rename(&tmp_path, out).with_context(|| {
                 format!(
                     "cannot move the finished cookie into place at {}",

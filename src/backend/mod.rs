@@ -111,6 +111,15 @@ pub trait AndroidBackend {
     /// Whether ARM code can run on this host under the backend.
     /// `None` means we could not tell.
     fn arm_translation(&self) -> Result<Option<ArmTranslation>>;
+
+    /// The Wayland app id, or X11 window class, that this backend gives an
+    /// app's windows.
+    ///
+    /// A desktop launcher puts this in `StartupWMClass` so the taskbar
+    /// matches the running window to its menu entry instead of showing a
+    /// second, nameless one. `None` means the backend cannot say, and the
+    /// key is then left out rather than guessed at.
+    fn window_class(&self, package: &str) -> Option<String>;
 }
 
 /// How ARM apps run on a non-ARM host.

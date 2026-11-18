@@ -49,7 +49,8 @@ teapot.cpk
 
 ### Rules
 
-- `manifest.toml` is **required** and must be at the archive root.
+- `manifest.toml` is **required**, must be at the archive root, and **must be
+  the first entry in the archive**. See below for why.
 - `app/base.apk` is **required**. Its name inside the archive is always
   `app/base.apk`, whatever the source file was called.
 - Split APKs live in `app/` and keep their original filenames, reduced to
@@ -60,6 +61,23 @@ teapot.cpk
 - Entry names are never absolute and never contain `..`. A reader must
   nonetheless reduce every entry name to its final path component before
   writing it to disk, and Cookie does.
+
+### Why `manifest.toml` comes first
+
+Reading a cookie never depends on entry order — a zip's central directory
+gives every entry's offset, so any member is one seek away.
+
+Desktop file-type detection does depend on it. The shared-mime-info rule that
+identifies a cookie looks for the literal string `manifest.toml` at byte
+offset 30, which is where a zip's **first** local file header puts its
+filename. Written anywhere else, a cookie would only ever be recognised by its
+extension — and that is not good enough, for the reasons under *MIME type*
+below.
+
+A writer must therefore emit `manifest.toml` first. In practice that means
+hashing the APKs before opening the archive, since `[baked.files]` has to be
+complete before the metadata is written. This costs no extra I/O: the digest
+was always a separate read.
 
 ---
 
@@ -186,13 +204,42 @@ A version 1 reader encountering unknown keys **must ignore them**, not fail.
 |---|---|
 | MIME type | `application/x-cookie-package` |
 | Extension | `.cpk` |
-| Magic | `PK\x03\x04` (it is a zip) |
+| Detected by | content: zip magic, then `manifest.toml` at offset 30 |
+| Sub-class of | `application/zip` |
 | Opened by | `cookie eat %f` |
 
-Milestone 2 installs the XDG MIME definition and the `.desktop` file that
-binds them, so double-clicking a cookie in Dolphin runs it.
+`cookie kitchen setup` installs the shared-mime-info definition and the
+`.desktop` file that binds them, so double-clicking a cookie runs it. A
+packaged Cookie installs the same files system-wide; see `dist/README.md`.
 
-Note that `.cpk` is not a globally unique extension — several games use it for
-unrelated archive formats. The MIME definition therefore matches on both the
-extension **and** the presence of `manifest.toml` at the archive root, so
-Cookie never claims a file it cannot open.
+### Detection is by content, with no filename glob
+
+`.cpk` is not a globally unique extension — several games use it for unrelated
+archive formats. The MIME definition therefore carries **no**
+`<glob pattern="*.cpk"/>`, only magic.
+
+This is not a theoretical concern, and the reason is not the obvious one.
+shared-mime-info consults a glob *before* magic: where a glob matches, the
+content is never examined. With a glob present, an unrelated zip named
+`something.cpk` is reported as `application/x-cookie-package`, given Cookie's
+icon, and handed to `cookie eat` on a double-click. Raising the magic
+`priority` does not change this — the glob still wins. Both behaviours were
+measured against `update-mime-database` and `gio info`, not assumed.
+
+Content-based detection gives, measured the same way:
+
+| File | Detected as |
+|---|---|
+| a cookie named `teapot.cpk` | `application/x-cookie-package` |
+| a cookie with **no extension** | `application/x-cookie-package` |
+| an unrelated zip named `impostor.cpk` | `application/zip` |
+| an empty file named `empty.cpk` | `application/x-zerosize` |
+| a cookie renamed `teapot.zip` | `application/zip` |
+
+The second row is a bonus a glob could never provide. The last row is the
+cost, and it is the right trade: a file named `.zip` being treated as a zip is
+reasonable, whereas claiming someone else's file is a broken double-click on
+their data.
+
+The magic registers at priority 60, above `application/zip`'s own 50, so a
+cookie is reported as a cookie rather than as the zip it also is.

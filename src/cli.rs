@@ -49,6 +49,10 @@ pub enum Command {
     Bake(BakeArgs),
 
     /// Install a cookie if needed, then run it
+    #[command(long_about = "Install a cookie and launch it.\n\n\
+                            Give it a .cpk file, or the name of an app already in the jar. \
+                            Installing also adds the app to your application menu, with its \
+                            own icon.")]
     Eat(EatArgs),
 
     /// List the cookies in the jar
@@ -69,6 +73,37 @@ pub enum Command {
 
     /// Uninstall a cookie
     Toss(TossArgs),
+
+    /// Set up desktop integration
+    #[command(long_about = "Teach your desktop about cookies.\n\n\
+                            Registers the application/x-cookie-package MIME type, installs the \
+                            handler that makes a double-clicked .cpk run `cookie eat`, and \
+                            builds an application-menu entry for everything already in the jar. \
+                            Everything goes under your own home directory; nothing needs root.")]
+    Kitchen(KitchenArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct KitchenArgs {
+    #[command(subcommand)]
+    pub action: Option<KitchenAction>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KitchenAction {
+    /// Register the MIME type, the handler and every app launcher
+    Setup,
+    /// Show what is currently registered
+    Status,
+    /// Remove Cookie's desktop integration
+    Remove(KitchenRemoveArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct KitchenRemoveArgs {
+    /// Also remove every app's menu entry
+    #[arg(long)]
+    pub launchers: bool,
 }
 
 #[derive(Debug, Args)]
@@ -92,9 +127,9 @@ pub struct BakeArgs {
 
 #[derive(Debug, Args)]
 pub struct EatArgs {
-    /// The .cpk to install and run
-    #[arg(value_name = "FILE")]
-    pub cpk: PathBuf,
+    /// A .cpk file, or the name of a cookie already in the jar
+    #[arg(value_name = "FILE_OR_NAME")]
+    pub target: String,
 
     /// Install again even if it is already in the jar
     #[arg(long)]
@@ -103,6 +138,10 @@ pub struct EatArgs {
     /// Install it, but do not launch it
     #[arg(long)]
     pub no_launch: bool,
+
+    /// Do not create or refresh its application-menu entry
+    #[arg(long)]
+    pub no_launcher: bool,
 }
 
 #[derive(Debug, Args)]

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Cookie
+GenericName=Android app runner
+Comment=Install and run an Android app packaged as a cookie
+Exec=cookie eat %f
+Icon=cookie
+Terminal=false
+NoDisplay=true
+StartupNotify=true
+MimeType=application/x-cookie-package;
+Categories=System;Utility;
+X-Cookie-Managed=true

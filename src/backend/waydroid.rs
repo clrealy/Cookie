@@ -623,6 +623,12 @@ impl AndroidBackend for Waydroid {
         Ok(())
     }
 
+    fn window_class(&self, package: &str) -> Option<String> {
+        // In multi-window mode Waydroid gives each app's surface an app id of
+        // `waydroid.<package>`, which is what its own generated launchers use.
+        Some(format!("waydroid.{package}"))
+    }
+
     fn arm_translation(&self) -> Result<Option<ArmTranslation>> {
         if system::host_is_arm() {
             return Ok(Some(ArmTranslation {
