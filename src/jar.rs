@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::apk::signing::Signature;
 use crate::cpk::manifest::CpkManifest;
 use crate::paths;
 use crate::util;
@@ -33,10 +34,13 @@ pub struct InstalledRecord {
     /// Icon filename inside the cookie's jar directory.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub icon: Option<String>,
-    /// Signing certificate digest at install time. Milestone 3 compares this
-    /// before updating an app in place.
+    /// Who signed the APKs that were installed.
+    ///
+    /// Compared against an incoming cookie before an app is updated in place,
+    /// so a different app wearing the same package id cannot inherit this
+    /// one's data.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub signature_sha256: Option<String>,
+    pub signature: Option<Signature>,
 }
 
 /// One installed cookie, as read back off disk.
@@ -110,7 +114,7 @@ pub fn put_in(
         backend: backend.to_string(),
         source_cpk: source_cpk.map(|p| p.display().to_string()),
         icon: icon_name,
-        signature_sha256: manifest.baked.signature_sha256.clone(),
+        signature: manifest.baked.signature.clone(),
     };
 
     let manifest_toml = manifest
@@ -299,7 +303,11 @@ mod tests {
                 at: "2026-11-18T00:00:00Z".into(),
                 base_apk: "app/base.apk".into(),
                 splits: Vec::new(),
-                signature_sha256: Some("abc123".into()),
+                signature: Some(Signature {
+                    signers: vec!["abc123".into()],
+                    schemes: vec![crate::apk::signing::Scheme::V2],
+                }),
+                legacy_signature_sha256: None,
                 files: BTreeMap::new(),
             },
         }
@@ -343,7 +351,15 @@ mod tests {
         assert_eq!(found.name(), "Teapot");
         assert_eq!(found.package, "com.example.teapot");
         assert_eq!(found.record.backend, "waydroid");
-        assert_eq!(found.record.signature_sha256.as_deref(), Some("abc123"));
+        assert_eq!(
+            found
+                .record
+                .signature
+                .as_ref()
+                .map(|s| s.signers.clone())
+                .unwrap_or_default(),
+            vec!["abc123".to_string()]
+        );
         assert!(found.icon_path().is_some());
     }
 

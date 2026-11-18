@@ -142,6 +142,14 @@ pub struct EatArgs {
     /// Do not create or refresh its application-menu entry
     #[arg(long)]
     pub no_launcher: bool,
+
+    /// Install an older version over a newer one, keeping its data
+    #[arg(long)]
+    pub allow_downgrade: bool,
+
+    /// Replace an app signed by a different key. Deletes its data.
+    #[arg(long)]
+    pub replace: bool,
 }
 
 #[derive(Debug, Args)]

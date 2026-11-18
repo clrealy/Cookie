@@ -6,10 +6,13 @@ use anyhow::{bail, Result};
 
 use crate::apk::{self, bundle};
 use crate::cli::BakeArgs;
+use crate::cpk::manifest::CpkManifest;
 use crate::cpk::pack;
+use crate::jar;
 use crate::paths;
 use crate::system;
 use crate::ui;
+use crate::update::{self, Decision};
 
 pub fn run(args: &BakeArgs) -> Result<()> {
     let inputs = bundle::resolve(&args.inputs)?;
@@ -75,13 +78,104 @@ pub fn run(args: &BakeArgs) -> Result<()> {
         },
         ui::bytes(size)
     ));
-    println!();
-    println!(
-        "  Eat it with:  {}",
-        ui::cyan(&format!("cookie eat {}", paths::tilde(&output)))
-    );
+    report_against_installed(&manifest, &output);
 
     Ok(())
+}
+
+/// Say what this cookie would do to the app already installed, if any.
+///
+/// Worth saying at bake time rather than leaving it for `eat`: the user has
+/// the APK in front of them now, and a signing-key mismatch is much easier to
+/// make sense of while they still remember where the file came from.
+fn report_against_installed(manifest: &CpkManifest, output: &std::path::Path) {
+    let eat = format!("cookie eat {}", paths::tilde(output));
+
+    // A jar we cannot read is not worth failing a successful bake over.
+    let installed = jar::get(&manifest.cookie.package).unwrap_or_default();
+
+    let decision = update::decide(installed.as_ref(), manifest);
+
+    match &decision {
+        Decision::Fresh => {
+            println!();
+            println!("  Eat it with:  {}", ui::cyan(&eat));
+        }
+
+        Decision::Update { from, to } => {
+            println!();
+            ui::status_line(
+                ui::Level::Ok,
+                &format!("updates the installed {}", manifest.cookie.name),
+                &format!("{from} -> {to}, keeping its data"),
+            );
+            println!();
+            println!("  Eat it with:  {}", ui::cyan(&eat));
+        }
+
+        Decision::Reinstall { version } => {
+            println!();
+            ui::status_line(
+                ui::Level::Info,
+                &format!("{} {version} is already installed", manifest.cookie.name),
+                "eating this will reinstall it, keeping its data",
+            );
+            println!();
+            println!("  Eat it with:  {}", ui::cyan(&eat));
+        }
+
+        Decision::Downgrade { from, to } => {
+            println!();
+            ui::status_line(
+                ui::Level::Warn,
+                &format!("older than the installed {}", manifest.cookie.name),
+                &format!("{from} is installed, this is {to}"),
+            );
+            ui::fix(&format!(
+                "Android will not downgrade an app by default. To do it anyway:\n  \
+                 {eat} --allow-downgrade"
+            ));
+        }
+
+        Decision::SignerMismatch {
+            installed: old,
+            incoming: new,
+        } => {
+            println!();
+            ui::status_line(
+                ui::Level::Fail,
+                "signed by a different key",
+                &format!(
+                    "{} is already installed and was signed by someone else",
+                    manifest.cookie.name
+                ),
+            );
+            ui::note(&update::signer_mismatch_message(
+                &manifest.cookie.name,
+                &manifest.cookie.package,
+                old,
+                new,
+            ));
+        }
+
+        Decision::SignerUnknown { reason } => {
+            println!();
+            ui::status_line(
+                ui::Level::Warn,
+                &format!(
+                    "cannot be checked against the installed {}",
+                    manifest.cookie.name
+                ),
+                "",
+            );
+            ui::note(&update::signer_unknown_message(
+                &manifest.cookie.name,
+                *reason,
+            ));
+            println!();
+            println!("  Eat it with:  {}", ui::cyan(&eat));
+        }
+    }
 }
 
 /// Warn when the APK's native code cannot run on this host.

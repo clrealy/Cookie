@@ -6,8 +6,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// The only `.cpk` format version that exists so far.
-pub const CPK_FORMAT_VERSION: u32 = 1;
+use crate::apk::signing::Signature;
+
+/// The current `.cpk` format version.
+///
+/// Version 2 replaced `[baked].signature_sha256` with the `[baked.signature]`
+/// table. The old field hashed the `META-INF` certificate *files*, whose
+/// bytes are not stable across rebuilds with the same key, so it could not
+/// answer the one question it existed for. See [`BakedMeta`].
+pub const CPK_FORMAT_VERSION: u32 = 2;
 
 /// Name of the metadata entry inside the archive.
 pub const MANIFEST_ENTRY: &str = "manifest.toml";
@@ -63,10 +70,22 @@ pub struct BakedMeta {
     /// Archive paths of any split APKs, sorted.
     #[serde(default)]
     pub splits: Vec<String>,
-    /// SHA-256 over the APK's v1 signing certificates, when it has them.
-    /// Used to tell an update from a different app with the same package id.
+    /// Who signed the base APK, for telling an update from a different app
+    /// wearing the same package id.
+    ///
+    /// Absent when nothing could be read, which callers must treat as "cannot
+    /// tell" rather than as "different signer".
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub signature_sha256: Option<String>,
+    pub signature: Option<Signature>,
+
+    /// Deprecated, and only ever read: this is what `.cpk` format version 1
+    /// wrote. It is the SHA-256 of the concatenated `META-INF/*.RSA` **file
+    /// bytes**, which vary between builds even when the signing key does not,
+    /// so it cannot answer whether two APKs share a signer. A version 1
+    /// cookie therefore has no usable signer identity and is treated as
+    /// unknown; re-bake it to get one.
+    #[serde(rename = "signature_sha256", skip_serializing, default)]
+    pub legacy_signature_sha256: Option<String>,
     /// SHA-256 of every APK in the archive, keyed by archive path.
     #[serde(default)]
     pub files: BTreeMap<String, String>,
@@ -157,7 +176,11 @@ mod tests {
                 at: "2026-11-18T22:36:00Z".into(),
                 base_apk: "app/base.apk".into(),
                 splits: vec!["app/split_config.arm64_v8a.apk".into()],
-                signature_sha256: Some("deadbeef".into()),
+                signature: Some(Signature {
+                    signers: vec!["deadbeef".into()],
+                    schemes: vec![crate::apk::signing::Scheme::V2],
+                }),
+                legacy_signature_sha256: None,
                 files: BTreeMap::new(),
             },
         }

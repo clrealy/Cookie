@@ -8,6 +8,7 @@ pub mod axml;
 pub mod axml_fixture;
 pub mod bundle;
 pub mod manifest;
+pub mod signing;
 
 use std::fs::File;
 use std::io::Read;
@@ -217,52 +218,6 @@ fn score_icon_entry(name: &str, size: u64) -> Option<IconCandidate> {
         size,
         score,
     })
-}
-
-/// SHA-256 of the APK's v1 signing certificate, when it has one.
-///
-/// Used by `cookie bake` to tell an in-place update from a different app
-/// wearing the same package id. APKs signed only with Signature Scheme v2/v3
-/// carry no `META-INF` certificate; those return `None`, and the caller warns
-/// that it cannot verify the signature. Parsing the v2 signing block is
-/// milestone 3 work.
-pub fn signing_digest(path: &Path) -> Result<Option<String>> {
-    let file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-    let mut zip = zip::ZipArchive::new(file)
-        .with_context(|| format!("cannot read {} as a zip", path.display()))?;
-
-    let mut cert_entries: Vec<String> = (0..zip.len())
-        .filter_map(|i| {
-            zip.by_index_raw(i)
-                .ok()
-                .and_then(|e| e.name().ok().map(|n| n.into_owned()))
-        })
-        .filter(|name| {
-            let lower = name.to_ascii_lowercase();
-            lower.starts_with("meta-inf/")
-                && (lower.ends_with(".rsa") || lower.ends_with(".dsa") || lower.ends_with(".ec"))
-        })
-        .collect();
-    cert_entries.sort();
-
-    if cert_entries.is_empty() {
-        return Ok(None);
-    }
-
-    // Hash every certificate, in a stable order, so multi-signer APKs produce
-    // one reproducible digest.
-    let mut hasher = Sha256::new();
-    for name in &cert_entries {
-        let mut entry = zip
-            .by_name(name)
-            .with_context(|| format!("cannot read {name}"))?;
-        let mut buf = Vec::new();
-        entry
-            .read_to_end(&mut buf)
-            .with_context(|| format!("cannot read {name}"))?;
-        hasher.update(&buf);
-    }
-    Ok(Some(format!("{:x}", hasher.finalize())))
 }
 
 /// SHA-256 of a whole file, as lowercase hex.

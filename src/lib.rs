@@ -25,6 +25,7 @@ pub mod notify;
 pub mod paths;
 pub mod system;
 pub mod ui;
+pub mod update;
 pub mod util;
 
 use anyhow::Result;

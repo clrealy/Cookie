@@ -12,10 +12,16 @@ check the parser against a second implementation rather than itself.
 Usage:  python3 tests/fixtures/make_fixtures.py
 """
 
+import io
+import json
 import struct
+import sys
 import zipfile
 import zlib
 import os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import make_signatures as sig
 
 ANDROID_NS = "http://schemas.android.com/apk/res/android"
 NO_STRING = 0xFFFFFFFF
@@ -162,37 +168,95 @@ def png(size, rgb):
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def write(name, entries):
-    path = os.path.join(HERE, name)
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+def build_zip(entries):
+    """A zip in memory, so a signing block can be spliced in afterwards."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as z:
         for entry, data in entries:
             z.writestr(entry, data)
+    return buffer.getvalue()
+
+
+def write(name, entries, signer=None, schemes=("v1", "v2", "v3")):
+    """Write a fixture APK, optionally signed.
+
+    `signer` is a (key, cert) pair. v1 adds a PKCS#7 blob under META-INF;
+    v2 and v3 add an APK Signing Block after the file entries.
+    """
+    entries = list(entries)
+    if signer is not None and "v1" in schemes:
+        key, cert = signer
+        entries.append(("META-INF/CERT.RSA", sig.pkcs7_blob(key, cert)))
+        entries.append(("META-INF/CERT.SF", b"Signature-Version: 1.0\n"))
+        entries.append(("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\n"))
+
+    data = build_zip(entries)
+
+    if signer is not None:
+        key, cert = signer
+        block_schemes = tuple(s for s in schemes if s in ("v2", "v3"))
+        if block_schemes:
+            data = sig.sign(data, key, cert, block_schemes)
+
+    path = os.path.join(HERE, name)
+    with open(path, "wb") as f:
+        f.write(data)
     print(f"{name}: {os.path.getsize(path)} bytes")
 
 
-# A plain app: arm64 native code, a proper mipmap launcher icon.
-write("teapot.apk", [
+# Two signing keys: the app's own, and someone else's.
+teapot_signer = sig.make_key_and_cert("Teapot Test Key")
+other_signer = sig.make_key_and_cert("Someone Else Test Key")
+
+teapot_entries = [
     ("AndroidManifest.xml", base_manifest("com.example.teapot", 4210, "2.1.0", "Teapot")),
     ("lib/arm64-v8a/libteapot.so", b"\x7fELF" + b"\x00" * 64),
     ("res/mipmap-xxxhdpi/ic_launcher.png", png(16, (210, 140, 60))),
     ("res/mipmap-mdpi/ic_launcher.png", png(8, (210, 140, 60))),
     ("res/drawable-hdpi/background.png", png(8, (10, 10, 10))),
     ("classes.dex", b"dex\n035\x00" + b"\x00" * 32),
-    ("META-INF/CERT.RSA", b"pretend certificate bytes for the teapot app"),
-])
+]
+
+
+def teapot_entries_at(version_code, version_name):
+    entries = list(teapot_entries)
+    entries[0] = (
+        "AndroidManifest.xml",
+        base_manifest("com.example.teapot", version_code, version_name, "Teapot"),
+    )
+    return entries
+
+
+# The app as first released: signed under every scheme, as a real app is.
+write("teapot.apk", teapot_entries_at(4210, "2.1.0"), teapot_signer)
+
+# A genuine update: same key, higher version.
+write("teapot-v2.apk", teapot_entries_at(4300, "2.2.0"), teapot_signer)
+
+# An older build, for the downgrade path.
+write("teapot-old.apk", teapot_entries_at(4100, "2.0.0"), teapot_signer)
+
+# The dangerous one: same package id, different key.
+write("teapot-resigned.apk", teapot_entries_at(4300, "2.2.0"), other_signer)
+
+# Signed only under v2: no META-INF at all, as a modern app may be.
+write("teapot-v2only.apk", teapot_entries_at(4300, "2.2.0"), teapot_signer, schemes=("v2",))
+
+# Signed only under v1, the legacy jar scheme.
+write("teapot-v1only.apk", teapot_entries_at(4300, "2.2.0"), teapot_signer, schemes=("v1",))
 
 # The matching arm64 split.
 write("teapot-split-arm64.apk", [
     ("AndroidManifest.xml", split_manifest("com.example.teapot", "config.arm64_v8a", 4210)),
     ("lib/arm64-v8a/libextra.so", b"\x7fELF" + b"\x00" * 32),
-])
+], teapot_signer)
 
 # A split that belongs to a different app, for the mismatch test.
 write("kettle-split.apk", [
     ("AndroidManifest.xml", split_manifest("com.example.kettle", "config.arm64_v8a", 1)),
 ])
 
-# No native code, no icon at all: exercises the fallback paths.
+# No native code, no icon, no signature at all.
 write("plain.apk", [
     ("AndroidManifest.xml", base_manifest("com.example.plain", 1, "1.0", "Plain")),
     ("classes.dex", b"dex\n035\x00" + b"\x00" * 16),
@@ -208,3 +272,15 @@ with zipfile.ZipFile(bundle_path, "w", zipfile.ZIP_DEFLATED) as z:
     z.writestr("manifest.json", '{"package_name": "com.example.teapot"}')
     z.writestr("icon.png", png(16, (210, 140, 60)))
 print(f"teapot.xapk: {os.path.getsize(bundle_path)} bytes")
+
+# Record the certificate digests, computed here with hashlib, so the Rust
+# tests check Cookie's reader against an independent implementation rather
+# than against itself.
+expected = {
+    "teapot": sig.certificate_sha256(teapot_signer[1]),
+    "other": sig.certificate_sha256(other_signer[1]),
+}
+with open(os.path.join(HERE, "signatures.json"), "w") as f:
+    json.dump(expected, f, indent=2, sort_keys=True)
+    f.write("\n")
+print("signatures.json:", expected)

@@ -1,7 +1,7 @@
 # The Cookie Package format (`.cpk`)
 
-**Format version: 1**
-**Status: stable for milestone 1. Version 2 will add what milestone 3 and 4 need.**
+**Format version: 2**
+**Status: stable. Version 1 is still readable; see *Version history* at the end.**
 
 A `.cpk` — a *cookie* — holds one Android app and everything Cookie needs to
 install it, launch it, and show it in a desktop menu like any other program.
@@ -84,7 +84,7 @@ was always a separate read.
 ## `manifest.toml`
 
 ```toml
-cpk_version = 1
+cpk_version = 2
 
 [cookie]
 name = "Teapot"
@@ -102,7 +102,10 @@ by = "cookie 0.1.0"
 at = "2026-11-18T23:01:10Z"
 base_apk = "app/base.apk"
 splits = ["app/split_config.arm64_v8a.apk"]
-signature_sha256 = "ea185bf3dc83d0e9a71af5914bc81f22712a9b1900af579cd6be44ec3193a192"
+
+[baked.signature]
+schemes = ["v1", "v2", "v3"]
+signers = ["5a63565ddd461e87b4364e5441978877a7e84c36063016fa674b12a22a34097d"]
 
 [baked.files]
 "app/base.apk" = "e1bbdaa7f1d70a899c1faa6c571dce8ac3d227232ccba0a44201b637d8483bed"
@@ -113,7 +116,7 @@ signature_sha256 = "ea185bf3dc83d0e9a71af5914bc81f22712a9b1900af579cd6be44ec3193
 
 | Key | Type | Required | Meaning |
 |---|---|---|---|
-| `cpk_version` | integer | yes | Format version. `1` today. A reader **must** refuse a cookie whose version is higher than it understands, and say so. |
+| `cpk_version` | integer | yes | Format version. `2` today. A reader **must** refuse a cookie whose version is higher than it understands, and say so. |
 
 ### `[cookie]` — what the app is
 
@@ -140,26 +143,53 @@ zeros.
 | `at` | string | yes | Bake time, ISO 8601 UTC, e.g. `"2026-11-18T23:01:10Z"`. |
 | `base_apk` | string | yes | Archive path of the base APK. Always `app/base.apk` in version 1. |
 | `splits` | array of string | no, defaults `[]` | Archive paths of split APKs, sorted. |
-| `signature_sha256` | string | no | SHA-256 over the base APK's v1 signing certificates, concatenated in sorted entry-name order. See below. |
 | `files` | table | no, defaults `{}` | SHA-256 of each APK, keyed by archive path. |
 
-#### About `signature_sha256`
+### `[baked.signature]` — who signed it
 
-This exists so milestone 3 can tell *"a newer build of the app you already
-have"* from *"a different app wearing the same package id"*, and refuse to
-replace one with the other silently.
+| Key | Type | Required | Meaning |
+|---|---|---|---|
+| `signers` | array of string | no, defaults `[]` | SHA-256 of each signing certificate's DER encoding, lowercase hex, sorted and unique. |
+| `schemes` | array of string | no, defaults `[]` | Which schemes the certificates were found under: `"v1"`, `"v2"`, `"v3"`, `"v3.1"`. |
 
-It is the SHA-256 of every `META-INF/*.{RSA,DSA,EC}` entry in the base APK,
-hashed in sorted entry-name order. That is APK Signature Scheme **v1**.
+The whole table is **omitted** when nothing could be read. A reader that finds
+it missing must treat the signer as *unknown* — never as *different*.
 
-**An APK signed only with Scheme v2 or v3 has no such entry, and the key is
-omitted.** A reader that finds it missing must warn that the signature could
-not be checked rather than assume a match. Parsing the v2 signing block is
-planned for version 2 of this format.
+#### What the digest is, and why
 
-This value identifies a signer; it is **not** a verification of the signature.
-Cookie does not currently verify that an APK's signature is valid — the
-Android runtime does that at install time.
+This exists to tell *"a newer build of the app you already have"* from *"a
+different app wearing the same package id"*. Android ties an app's data to the
+key that signed it, so this is what decides whether an update may keep that
+data.
+
+Each entry is the SHA-256 of a signing certificate in its DER form — the same
+value `apksigner verify --print-certs` prints as the *Signer #1 certificate
+SHA-256 digest*, and the same one Android compares on install.
+
+Certificates are collected from every scheme present:
+
+| Scheme | Where the certificate lives |
+|---|---|
+| v1 (jar signing) | inside the PKCS#7 `SignedData` in `META-INF/*.{RSA,DSA,EC}` |
+| v2, v3, v3.1 | the APK Signing Block, between the file entries and the central directory, as raw DER |
+
+Comparison is an **intersection, not equality**: two APKs share a signer if
+they have any certificate in common. An app may be signed by several keys, or
+add or drop a scheme between releases, and any of those is still the same app.
+
+**This is an identity, not a verification.** Cookie does not check that a
+signature is cryptographically valid. Android does that at install time, and
+duplicating it here would mean shipping a crypto stack to re-answer a question
+the runtime already answers properly.
+
+#### Known limitation: key rotation
+
+Signature Scheme v3 lets an app rotate to a new signing key, carrying a
+*proof-of-rotation* lineage that links the old key to the new one. Cookie does
+not yet read that lineage, so an app that has rotated its key reads as a
+signer mismatch. The install is refused with an explanation rather than going
+ahead, which is the safe direction to be wrong in, and `--replace` is
+available for a user who knows the rotation is genuine.
 
 ---
 
@@ -188,13 +218,38 @@ not collide with something a tool invented in the meantime.
 
 | Name | Planned for |
 |---|---|
-| `data/` | Milestone 3: app data captured for backup or migration. |
+| `data/` | App data captured for backup or migration. |
 | `[cookie].permissions` | Declared Android permissions, shown before install. |
 | `[cookie].features` | `<uses-feature>` requirements, so `burnt` can flag a missing one. |
-| `[baked].signature_v2` | Signature Scheme v2/v3 signer digest. |
+| `[baked.signature].lineage` | v3 proof-of-rotation, so a rotated key is recognised. |
 | `[desktop]` | Overrides for the generated `.desktop` file. |
 
-A version 1 reader encountering unknown keys **must ignore them**, not fail.
+A reader encountering unknown keys **must ignore them**, not fail.
+
+---
+
+## Version history
+
+### Version 2
+
+Replaced `[baked].signature_sha256` with the `[baked.signature]` table.
+
+The old field was the SHA-256 of the concatenated `META-INF/*.RSA` **file
+bytes**. Those bytes are not a stable identity: the same key signing the same
+app again can produce a different blob, because the signed attributes and the
+signature value itself vary. It therefore could not answer the one question it
+existed for. It also had nothing to say about APKs signed only under v2 or v3,
+which is most modern ones.
+
+Version 2 hashes the signing *certificate* instead, from whichever schemes are
+present.
+
+### Version 1
+
+A version 1 cookie still opens, and everything else in it is read normally.
+Its `signature_sha256` is read but never compared and never written back, so
+such a cookie has **no usable signer identity** and is reported as unknown.
+Re-bake it from the original APK to get one.
 
 ---
 

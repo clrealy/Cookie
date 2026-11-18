@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 
 use super::cmd;
-use super::{AndroidBackend, ArmTranslation, InstalledApp, LogSpec, OvenState, OvenStatus};
+use super::{
+    AndroidBackend, ArmTranslation, InstallOptions, InstalledApp, LogSpec, OvenState, OvenStatus,
+};
 use crate::system;
 use crate::ui;
 
@@ -106,15 +108,22 @@ impl Waydroid {
         } else {
             out.message()
         };
-        bail!(
-            "Waydroid could not install {}:\n{}\n\n\
-             Common causes:\n  \
-             - the app needs an ABI this system cannot run (check `cookie burnt`)\n  \
-             - a different build of the same app is already installed\n  \
-             - the APK is damaged",
-            apk.display(),
-            cmd::indent(&message)
-        )
+        match super::explain_install_failure(&message) {
+            Some(explanation) => bail!(
+                "Waydroid could not install {}:\n{}\n\n{explanation}",
+                apk.display(),
+                cmd::indent(&message)
+            ),
+            None => bail!(
+                "Waydroid could not install {}:\n{}\n\n\
+                 Common causes:\n  \
+                 - the app needs an ABI this system cannot run (check `cookie burnt`)\n  \
+                 - a different build of the same app is already installed\n  \
+                 - the APK is damaged",
+                apk.display(),
+                cmd::indent(&message)
+            ),
+        }
     }
 
     /// Install a base APK plus splits, using a `pm` install session.
@@ -123,7 +132,7 @@ impl Waydroid {
     /// through `pm install-create` / `install-write` / `install-commit`
     /// inside the container. The APKs are staged in Waydroid's shared storage
     /// first, because `pm` reads paths from the container's point of view.
-    fn install_split_set(&self, apks: &[PathBuf]) -> Result<()> {
+    fn install_split_set(&self, apks: &[PathBuf], options: &InstallOptions) -> Result<()> {
         let storage = self.shared_storage()?;
         if !storage.is_dir() {
             bail!(
@@ -178,7 +187,7 @@ impl Waydroid {
             ));
         }
 
-        let result = self.run_install_session(&staged);
+        let result = self.run_install_session(&staged, options);
 
         // Always clean up the staged copies, success or not.
         for (_, _, _) in &staged {}
@@ -188,11 +197,26 @@ impl Waydroid {
     }
 
     /// Drive one `pm` install session to completion.
-    fn run_install_session(&self, staged: &[(String, u64, String)]) -> Result<()> {
+    fn run_install_session(
+        &self,
+        staged: &[(String, u64, String)],
+        options: &InstallOptions,
+    ) -> Result<()> {
         let total: u64 = staged.iter().map(|(_, size, _)| size).sum();
         let total_str = total.to_string();
 
-        let created = self.shell(&["pm", "install-create", "-r", "-S", &total_str])?;
+        let mut create: Vec<&str> = vec!["pm", "install-create"];
+        if options.keep_data {
+            // -r replaces the existing app and keeps its data.
+            create.push("-r");
+        }
+        if options.allow_downgrade {
+            create.push("-d");
+        }
+        create.push("-S");
+        create.push(&total_str);
+
+        let created = self.shell(&create)?;
         if !created.ok() {
             let message = created.message();
             if looks_like_permission_problem(&message) {
@@ -239,13 +263,17 @@ impl Waydroid {
 
             let out = self.shell(&["pm", "install-commit", &session_id])?;
             if !out.ok() || mentions_failure(&out.stdout) {
-                bail!(
-                    "the install did not go through:\n{}\n\n\
-                     If this mentions INSTALL_FAILED_UPDATE_INCOMPATIBLE, a different build of \
-                     this app is already installed. Remove it first:\n  \
-                     cookie toss <name>",
-                    cmd::indent(&out.message())
-                );
+                let reported = format!("{}{}", out.stdout, out.stderr);
+                match super::explain_install_failure(&reported) {
+                    Some(explanation) => bail!(
+                        "the install did not go through:\n{}\n\n{explanation}",
+                        cmd::indent(reported.trim())
+                    ),
+                    None => bail!(
+                        "the install did not go through:\n{}",
+                        cmd::indent(reported.trim())
+                    ),
+                }
             }
             Ok(())
         })();
@@ -444,12 +472,14 @@ impl AndroidBackend for Waydroid {
         Ok(())
     }
 
-    fn install(&self, apks: &[PathBuf]) -> Result<()> {
+    fn install(&self, apks: &[PathBuf], options: &InstallOptions) -> Result<()> {
         self.ensure_available()?;
         match apks {
             [] => bail!("no APKs to install"),
-            [single] => self.install_single(single),
-            many => self.install_split_set(many),
+            // `waydroid app install` is the best-trodden path, but it takes
+            // no flags, so anything needing one goes through `pm` directly.
+            [single] if *options == InstallOptions::fresh() => self.install_single(single),
+            many => self.install_split_set(many, options),
         }
     }
 

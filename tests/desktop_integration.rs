@@ -32,7 +32,8 @@ fn manifest(name: &str, package: &str) -> CpkManifest {
             at: "2026-11-18T00:00:00Z".into(),
             base_apk: "app/base.apk".into(),
             splits: Vec::new(),
-            signature_sha256: None,
+            signature: None,
+            legacy_signature_sha256: None,
             files: BTreeMap::new(),
         },
     }

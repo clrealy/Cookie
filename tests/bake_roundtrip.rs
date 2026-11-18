@@ -76,18 +76,17 @@ fn reads_a_split_apk() {
 }
 
 #[test]
-fn a_signing_digest_is_stable() {
-    let first = apk::signing_digest(&fixture("teapot.apk")).expect("digest");
-    let second = apk::signing_digest(&fixture("teapot.apk")).expect("digest");
+fn a_signature_reads_the_same_way_twice() {
+    let first = apk::signing::read(&fixture("teapot.apk")).expect("signature");
+    let second = apk::signing::read(&fixture("teapot.apk")).expect("signature");
     assert_eq!(first, second);
-    assert!(first.is_some(), "the fixture has a META-INF certificate");
+    assert!(!first.is_unknown());
 
-    // An APK with no v1 certificate reports None rather than failing, so
-    // milestone 3 can warn instead of refusing.
-    assert_eq!(
-        apk::signing_digest(&fixture("plain.apk")).expect("digest"),
-        None
-    );
+    // An unsigned APK reports nothing rather than failing, so callers can
+    // warn instead of refusing.
+    assert!(apk::signing::read(&fixture("plain.apk"))
+        .expect("signature")
+        .is_unknown());
 }
 
 #[test]
@@ -97,7 +96,7 @@ fn bake_then_read_back() {
     assert!(cpk.is_file());
 
     let manifest = unpack::read_manifest(&cpk).expect("manifest reads");
-    assert_eq!(manifest.cpk_version, 1);
+    assert_eq!(manifest.cpk_version, 2);
     assert_eq!(manifest.cookie.name, "Teapot");
     assert_eq!(manifest.cookie.package, "com.example.teapot");
     assert_eq!(manifest.version_display(), "2.1.0 (4210)");
@@ -252,7 +251,7 @@ fn baking_twice_gives_the_same_app_metadata() {
     let b = unpack::read_manifest(&second).expect("b");
     assert_eq!(a.cookie, b.cookie);
     assert_eq!(a.baked.files, b.baked.files);
-    assert_eq!(a.baked.signature_sha256, b.baked.signature_sha256);
+    assert_eq!(a.baked.signature, b.baked.signature);
 }
 
 #[test]

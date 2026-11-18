@@ -53,6 +53,34 @@ pub struct InstalledApp {
     pub name: Option<String>,
 }
 
+/// How an install should behave when the app is already there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InstallOptions {
+    /// Install over an existing copy, keeping its data.
+    ///
+    /// Only ever set once the signing keys have been compared: Android ties
+    /// an app's data to its signing key, and this is the switch that decides
+    /// whether the new build inherits it.
+    pub keep_data: bool,
+    /// Permit a lower `versionCode` than the installed one.
+    pub allow_downgrade: bool,
+}
+
+impl InstallOptions {
+    /// A first install, with nothing to preserve.
+    pub fn fresh() -> Self {
+        Self::default()
+    }
+
+    /// An update from the same signer.
+    pub fn update() -> Self {
+        Self {
+            keep_data: true,
+            allow_downgrade: false,
+        }
+    }
+}
+
 /// What to show for `cookie crumbs`.
 #[derive(Debug, Clone)]
 pub struct LogSpec {
@@ -81,7 +109,7 @@ pub trait AndroidBackend {
     fn stop(&self) -> Result<()>;
 
     /// Install one app. `apks` is a base APK followed by any splits.
-    fn install(&self, apks: &[PathBuf]) -> Result<()>;
+    fn install(&self, apks: &[PathBuf], options: &InstallOptions) -> Result<()>;
 
     fn uninstall(&self, package: &str) -> Result<()>;
 
@@ -128,6 +156,66 @@ pub struct ArmTranslation {
     pub available: bool,
     /// `libhoudini`, `ndk-translation`, or whatever the backend reports.
     pub implementation: Option<String>,
+}
+
+/// Turn an Android package-manager failure into something a person can act
+/// on.
+///
+/// `pm` reports these as bare constants on stdout with a zero exit code, so
+/// they otherwise surface as an unexplained wall of capitals.
+pub fn explain_install_failure(output: &str) -> Option<&'static str> {
+    const EXPLANATIONS: &[(&str, &str)] = &[
+        (
+            "INSTALL_FAILED_UPDATE_INCOMPATIBLE",
+            "Android already has an app with this package id, signed by a different key.\n\
+             Remove the installed one first — this deletes its data:\n  \
+             cookie toss <name>",
+        ),
+        (
+            "INSTALL_FAILED_VERSION_DOWNGRADE",
+            "The installed version is newer than this one. Android does not downgrade an app \
+             by default, because the older build may not understand the newer one's data.\n\
+             To do it anyway:\n  cookie eat <file.cpk> --allow-downgrade",
+        ),
+        (
+            "INSTALL_FAILED_NO_MATCHING_ABIS",
+            "This app's native code is not built for an ABI this machine can run.\n\
+             Check what is available:\n  cookie burnt",
+        ),
+        (
+            "INSTALL_FAILED_INSUFFICIENT_STORAGE",
+            "The Android image has run out of space.",
+        ),
+        (
+            "INSTALL_FAILED_OLDER_SDK",
+            "This app needs a newer Android version than the runtime provides.",
+        ),
+        (
+            "INSTALL_PARSE_FAILED_NO_CERTIFICATES",
+            "The APK is not signed, and Android will not install an unsigned app.",
+        ),
+        (
+            "INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES",
+            "The APKs in this cookie are not all signed by the same key, so Android will not \
+             install them together.",
+        ),
+        (
+            "INSTALL_FAILED_INVALID_APK",
+            "Android could not read one of the APKs. The cookie may be damaged; try baking it \
+             again from the original APK.",
+        ),
+        (
+            "INSTALL_FAILED_MISSING_SPLIT",
+            "This app is split into several APKs and one of them is missing. Bake the base APK \
+             together with all of its splits.",
+        ),
+    ];
+
+    let upper = output.to_ascii_uppercase();
+    EXPLANATIONS
+        .iter()
+        .find(|(code, _)| upper.contains(code))
+        .map(|(_, explanation)| *explanation)
 }
 
 /// Pick a backend.

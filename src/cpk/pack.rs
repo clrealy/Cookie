@@ -177,7 +177,11 @@ pub fn bake(sorted: &Sorted, name_override: Option<&str>, out: &Path) -> Result<
                 .map(|(_, e)| e.clone())
                 .filter(|e| e != &base_entry)
                 .collect(),
-            signature_sha256: apk::signing_digest(&base.path)?,
+            signature: {
+                let signature = apk::signing::read(&base.path)?;
+                (!signature.is_unknown()).then_some(signature)
+            },
+            legacy_signature_sha256: None,
             files,
         },
     };

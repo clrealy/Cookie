@@ -14,15 +14,14 @@ One app, one ordinary desktop window. No Android home screen in the way.
 
 > ## ⚠️ Work in progress — nothing here is finished
 >
-> Cookie is at **milestone 2 of 4**. Today it is a friendlier front end over
+> Cookie is at **milestone 3 of 4**. Today it is a friendlier front end over
 > [Waydroid](https://waydro.id/), which does the actual Android running. The
 > commands work, the `.cpk` format is real, double-clicking a cookie runs it,
-> installed apps appear in your application menu, and `cookie burnt` will tell
-> you honestly what your machine is missing.
+> installed apps appear in your application menu, updates keep your data, and
+> `cookie burnt` will tell you honestly what your machine is missing.
 >
-> **What does not exist yet:** in-place updates that keep your app data
-> (milestone 3), and Cookie's own runtime — the oven — replacing Waydroid
-> (milestone 4).
+> **What does not exist yet:** Cookie's own runtime — the oven — replacing
+> Waydroid (milestone 4).
 >
 > Expect rough edges. Expect the `.cpk` format to gain fields. Do not put
 > anything you care about in here yet.
@@ -137,18 +136,106 @@ cookie bake teapot.apk --force                      # overwrite an existing cook
 ### `cookie eat` — install if needed, then run
 
 ```sh
-cookie eat teapot.cpk               # install (if new) and launch
-cookie eat Teapot                   # an app already in the jar, by name
-cookie eat com.example.teapot       # or by package id
-cookie eat teapot.cpk --no-launch   # install only
-cookie eat teapot.cpk --reinstall   # install again even if it is already there
-cookie eat teapot.cpk --no-launcher # skip the application-menu entry
+cookie eat teapot.cpk                   # install (if new) and launch
+cookie eat Teapot                       # an app already in the jar, by name
+cookie eat com.example.teapot           # or by package id
+cookie eat teapot.cpk --no-launch       # install only
+cookie eat teapot.cpk --reinstall       # install again even if it is already there
+cookie eat teapot.cpk --no-launcher     # skip the application-menu entry
+cookie eat teapot.cpk --allow-downgrade # install an older build over a newer one
+cookie eat teapot.cpk --replace         # replace an app signed by a different key
 ```
 
 Warms the oven for you if it is cold, turns on one-window-per-app mode, and
 adds the app to your application menu with its own icon.
 
+If the app is already installed, this is also where updating happens — see
+below.
+
 This is also what runs when you double-click a `.cpk` in your file manager.
+
+---
+
+## Updating an app, without losing its data
+
+Bake a newer APK of something you already have, and Cookie says so:
+
+```
+✔ Baked Teapot -> teapot.cpk
+      package   com.example.teapot
+      version   2.2.0 (4300)
+
+  ✔ updates the installed Teapot  2.1.0 (4210) -> 2.2.0 (4300), keeping its data
+
+  Eat it with:  cookie eat teapot.cpk
+```
+
+Eating it installs the new build over the old one. Your logins, settings and
+files stay exactly where they were.
+
+### Why it checks the signing key first
+
+Android ties an app's data to the key that signed it. Two APKs can claim the
+same package id — `com.example.teapot` — while being built by completely
+different people. Installing one over the other would hand the first app's
+data, including anything it is signed in to, to a build that did not create
+it.
+
+So Cookie compares signing certificates before it does anything. Not version
+numbers, not names: the key.
+
+```
+✘ signed by a different key  Teapot is already installed and was signed by someone else
+
+      installed  5a63565ddd461e87  (v1, v2, v3)
+      this one   b7f84552d3c7692d  (v1, v2, v3)
+
+      Both claim the package id com.example.teapot, so Android treats them as the
+      same app — but they were built by different people, or with different keys.
+      Replacing one with the other would hand the installed app's data, including
+      any accounts it is signed in to, to a build that did not create it.
+
+      Cookie will not do that quietly. If you are sure this is the app you want:
+        cookie toss Teapot            # remove the installed one and its data
+        cookie eat <file.cpk>         # then install this one fresh
+
+      Or, in one step, which also deletes the app's data:
+        cookie eat <file.cpk> --replace
+```
+
+That check happens **before** the oven is started and before anything is
+deleted, so a cookie with the wrong key costs you nothing but the message.
+
+### What Cookie decides
+
+| Situation | What happens |
+|---|---|
+| Not installed | Normal install |
+| Same key, newer version | Updates in place, **data kept** |
+| Same key, same version | Reinstalls, data kept |
+| Same key, older version | Refused — Android does not downgrade by default. `--allow-downgrade` to insist |
+| **Different key** | **Refused.** `--replace` to wipe and install fresh |
+| Signature unreadable | Warns, then lets Android decide and report |
+
+### How the key is read
+
+Cookie reads the signing certificate from every scheme an APK carries — v1
+jar signing (a PKCS#7 blob under `META-INF`), and Signature Scheme v2, v3 and
+v3.1 (the APK Signing Block). It hashes the certificate itself, which is the
+same value `apksigner verify --print-certs` reports.
+
+Two APKs count as the same app if they share *any* certificate, so adding or
+dropping a scheme between releases does not break an update.
+
+Cookie does **not** verify that a signature is cryptographically valid. That
+is Android's job at install time, and duplicating it would mean shipping a
+crypto stack to re-answer a question the runtime already answers properly.
+
+**One known gap:** Signature Scheme v3 allows an app to rotate to a new
+signing key. Cookie does not yet read the rotation lineage, so a rotated app
+reads as a key mismatch and is refused with an explanation. That is the safe
+direction to be wrong in, and `--replace` is there if you know the rotation is
+genuine.
 
 ### `cookie jar` — what is installed
 
@@ -328,6 +415,10 @@ It is a zip rather than a `tar.zst` because a zip's central directory lets
 decompressing a 400 MB stream to reach a 500-byte file. APKs are stored
 without recompression, since they are already compressed zips themselves.
 
+`manifest.toml` is always the **first** entry, which is what lets a file
+manager recognise a cookie by its content rather than its name. It records the
+app's signing certificate, which is what makes safe updates possible.
+
 The full specification is in **[docs/cpk-spec.md](docs/cpk-spec.md)**.
 
 ---
@@ -338,8 +429,8 @@ The full specification is in **[docs/cpk-spec.md](docs/cpk-spec.md)**.
 |---|---|---|
 | **1** | `bake`, `eat`, `jar`, `crumbs`, `burnt`, `oven`, `toss` on a Waydroid backend | ✅ done |
 | **2** | `application/x-cookie-package` MIME type, `.desktop` launchers with icons, double-click to run | ✅ done |
-| **3** | In-place updates that keep app data when signatures match, and warn loudly when they do not | ⬜ next |
-| **4** | **The oven**: Cookie's own runtime — container setup, binderfs mounting, one shared Android image — replacing Waydroid | ⬜ |
+| **3** | In-place updates that keep app data when signatures match, and warn loudly when they do not | ✅ done |
+| **4** | **The oven**: Cookie's own runtime — container setup, binderfs mounting, one shared Android image — replacing Waydroid | ⬜ next |
 
 The backend already sits behind a trait (`AndroidBackend`), so milestone 4 is
 a new implementation rather than a rewrite.
@@ -349,7 +440,7 @@ a new implementation rather than a rewrite.
 ## Development
 
 ```sh
-cargo test                              # 168 tests
+cargo test                              # 214 tests
 cargo clippy --all-targets              # clean
 cargo fmt --check                       # clean
 python3 tests/fixtures/make_fixtures.py # regenerate the test APKs
@@ -363,10 +454,16 @@ They are generated from the same code `cookie kitchen setup` uses, and a test
 fails if the two ever drift apart.
 
 The fixtures in `tests/fixtures/` are structurally real APKs — genuine zip
-layout, genuine Android binary XML — built by a script that implements the
-AXML format independently of Cookie's own reader, so the parser is checked
-against a second implementation rather than against itself. They contain no
-executable code.
+layout, genuine Android binary XML, genuine X.509 certificates, a genuine
+PKCS#7 blob and a genuine APK Signing Block. They are built by a script that
+implements those formats independently of Cookie's own readers, so the parsers
+are checked against a second implementation rather than against themselves.
+`signatures.json` records the certificate digests as computed by Python's
+`hashlib`, and the tests assert Cookie arrives at the same values.
+
+They contain no executable code, and their signatures are not
+cryptographically meaningful — which is fine, because Cookie reads the signer
+rather than verifying the signature.
 
 ### House rules
 
@@ -374,6 +471,10 @@ executable code.
 - Every error says what went wrong **and** what to do about it.
 - Metadata from an APK is untrusted input. It gets escaped before it reaches a
   `.desktop` file, and sanitised before it becomes part of a filename.
+- Binary parsers run over files the user did not write. Every read is
+  bounds-checked, and a malformed file produces an error, never a panic.
+- "Cannot tell" is never silently treated as "fine". An unreadable signature
+  warns; it does not pass.
 - Never assume systemd.
 - `sudo` only when it is genuinely required, and always with the reason.
 - Cookie reads files the user gives it. It downloads nothing.
