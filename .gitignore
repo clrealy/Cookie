@@ -1,3 +1,5 @@
 /target
 *.cpk
 *.cpk.partial
+__pycache__/
+*.pyc
