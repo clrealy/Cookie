@@ -1,5 +1,10 @@
 # Packaging Cookie
 
+Already packaged for [GURT](https://github.com/clrealy/GURT): the recipe is in
+**[gurt/](gurt/)**.
+
+The rest of this file is for packaging Cookie for any other distribution.
+
 These files are for installing Cookie **system-wide**, from a distribution
 package. A user installing Cookie by hand does not need them — they run
 `cookie kitchen setup`, which writes the per-user equivalents under
