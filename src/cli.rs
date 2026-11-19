@@ -195,6 +195,44 @@ pub enum OvenAction {
     Stop,
     /// Say whether it is running
     Status,
+    /// Print the container configuration Cookie would use
+    #[command(
+        long_about = "Print the container configuration the oven generates.\n\n\
+                            This is what Cookie asks of LXC, built from what your machine \
+                            actually has: your binder devices, your GPU, your Wayland socket. \
+                            It needs nothing installed, so it is a way to check the setup \
+                            before committing to it."
+    )]
+    Recipe,
+    /// Manage the shared Android system image
+    #[command(long_about = "The Android system image every cookie shares.\n\n\
+                            Cookie does not download one. Which system image to trust is your \
+                            call, not Cookie's, so you supply the file and Cookie checks that \
+                            it is usable.")]
+    Image(OvenImageArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct OvenImageArgs {
+    #[command(subcommand)]
+    pub action: Option<OvenImageAction>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OvenImageAction {
+    /// Register a system image
+    Add(OvenImageAddArgs),
+    /// Forget the registered image
+    Remove,
+    /// Show what is registered
+    Show,
+}
+
+#[derive(Debug, Args)]
+pub struct OvenImageAddArgs {
+    /// Path to the image, usually system.img
+    #[arg(value_name = "FILE")]
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Args)]

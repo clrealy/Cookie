@@ -35,6 +35,8 @@ use cli::{Cli, Command};
 /// Run a parsed command line. Returns the process exit code.
 pub fn run(cli: Cli) -> Result<i32> {
     let backend_name = cli.global.backend.as_str();
+    // Catch a mistyped --backend even on commands that never build one.
+    backend::validate_name(backend_name)?;
 
     match &cli.command {
         Command::Bake(args) => {

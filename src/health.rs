@@ -91,6 +91,21 @@ pub fn run(backend: &dyn AndroidBackend) -> Result<Report> {
         check_desktop_integration(),
     ];
 
+    // Whatever else this particular backend wants reported.
+    let checks = checks
+        .into_iter()
+        .chain(backend.health_notes().into_iter().map(|note| Check {
+            level: match (note.blocking, note.advice.is_some()) {
+                (true, _) => Level::Fail,
+                (false, true) => Level::Warn,
+                (false, false) => Level::Ok,
+            },
+            label: note.label,
+            detail: note.detail,
+            fix: note.advice,
+        }))
+        .collect();
+
     Ok(Report { checks })
 }
 

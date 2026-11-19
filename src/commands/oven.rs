@@ -2,15 +2,17 @@
 
 use anyhow::Result;
 
+use crate::backend::oven::{Oven, OvenDirs};
 use crate::backend::{self, OvenState};
-use crate::cli::{OvenAction, OvenArgs};
+use crate::cli::{OvenAction, OvenArgs, OvenImageAction, OvenImageArgs};
 use crate::health;
+use crate::paths;
 use crate::ui::{self, Level};
 
 pub fn run(args: &OvenArgs, backend_name: &str, verbose: bool) -> Result<i32> {
     let backend = backend::detect(Some(backend_name))?;
 
-    match args.action {
+    match &args.action {
         OvenAction::Start => {
             let before = backend.status()?;
             if before.state.is_running() {
@@ -33,6 +35,10 @@ pub fn run(args: &OvenArgs, backend_name: &str, verbose: bool) -> Result<i32> {
             ui::success("The oven is off.");
             Ok(0)
         }
+        OvenAction::Image(image_args) => image(image_args),
+
+        OvenAction::Recipe => recipe(),
+
         OvenAction::Status => {
             let status = backend.status()?;
             let (level, text) = match &status.state {
@@ -41,9 +47,16 @@ pub fn run(args: &OvenArgs, backend_name: &str, verbose: bool) -> Result<i32> {
                 OvenState::NotInitialized => {
                     (Level::Fail, "the Android image is not set up".to_string())
                 }
-                OvenState::NotInstalled => {
-                    (Level::Fail, format!("{} is not installed", backend.name()))
-                }
+                OvenState::NotInstalled => (
+                    Level::Fail,
+                    // Backends say what is actually missing; for the oven
+                    // that is LXC, not the oven itself.
+                    if status.raw.trim().is_empty() {
+                        format!("{} is not installed", backend.name())
+                    } else {
+                        status.raw.trim().to_string()
+                    },
+                ),
                 OvenState::Unknown(what) => (Level::Warn, format!("unclear: {what}")),
             };
 
@@ -71,12 +84,118 @@ pub fn run(args: &OvenArgs, backend_name: &str, verbose: bool) -> Result<i32> {
             }
 
             if !status.state.is_running() {
+                // Keep the backend in the suggested commands, or following
+                // them lands the user on a different backend than the one
+                // they just asked about.
+                let suffix = if backend_name == "waydroid" || backend_name == "auto" {
+                    String::new()
+                } else {
+                    format!(" --backend {backend_name}")
+                };
                 println!();
-                println!("  Start it with:  {}", ui::cyan("cookie oven start"));
-                println!("  Full check:     {}", ui::cyan("cookie burnt"));
+                println!(
+                    "  Start it with:  {}",
+                    ui::cyan(&format!("cookie oven start{suffix}"))
+                );
+                println!(
+                    "  Full check:     {}",
+                    ui::cyan(&format!("cookie burnt{suffix}"))
+                );
                 return Ok(1);
             }
             Ok(0)
         }
     }
+}
+
+/// `cookie oven image` — the shared Android system image.
+fn image(args: &OvenImageArgs) -> Result<i32> {
+    let oven = Oven::with_dirs(OvenDirs::user()?);
+
+    match args.action.as_ref().unwrap_or(&OvenImageAction::Show) {
+        OvenImageAction::Add(add) => {
+            ui::step(&format!("checking {}", add.path.display()));
+            let image = oven.add_image(&add.path)?;
+            ui::success("Registered the system image.");
+            ui::note(&format!(
+                "path    {}\nformat  {}\nsize    {}",
+                paths::tilde(&image.path),
+                image.format.label(),
+                ui::bytes(image.size)
+            ));
+            println!();
+            println!(
+                "  Light the oven with:  {}",
+                ui::cyan("cookie oven start --backend oven")
+            );
+            Ok(0)
+        }
+
+        OvenImageAction::Remove => {
+            if oven.remove_image()? {
+                ui::success("Forgot the registered system image.");
+                ui::note(&ui::dim("The file itself was left alone."));
+            } else {
+                println!("No system image was registered.");
+            }
+            Ok(0)
+        }
+
+        OvenImageAction::Show => {
+            let record = oven.record()?;
+            match record.image {
+                Some(image) if image.is_present() => {
+                    ui::heading("System image");
+                    ui::status_line(Level::Ok, "path", &paths::tilde(&image.path));
+                    ui::status_line(Level::Info, "format", image.format.label());
+                    ui::status_line(Level::Info, "size", &ui::bytes(image.size));
+                    Ok(0)
+                }
+                Some(image) => {
+                    ui::heading("System image");
+                    ui::status_line(
+                        Level::Fail,
+                        "path",
+                        &format!("{} (missing or changed)", paths::tilde(&image.path)),
+                    );
+                    println!();
+                    println!(
+                        "  Register it again:  {}",
+                        ui::cyan("cookie oven image add <path>")
+                    );
+                    Ok(1)
+                }
+                None => {
+                    println!("No system image is registered.");
+                    println!();
+                    println!("  Cookie does not download one. Supply a LineageOS-derived");
+                    println!("  system image and register it:");
+                    println!(
+                        "    {}",
+                        ui::cyan("cookie oven image add /path/to/system.img")
+                    );
+                    Ok(1)
+                }
+            }
+        }
+    }
+}
+
+/// `cookie oven recipe` — the container configuration, as it would be written.
+///
+/// Printed to stdout on its own so it can be redirected or diffed. Anything
+/// about where it came from goes to stderr.
+fn recipe() -> Result<i32> {
+    let oven = Oven::with_dirs(OvenDirs::user()?);
+    let config = oven.container_config()?;
+
+    eprintln!(
+        "{}",
+        ui::dim(&format!(
+            "# built for this machine; `cookie oven start --backend oven` writes it to {}",
+            paths::tilde(&oven.dirs().config)
+        ))
+    );
+    print!("{}", config.render());
+    Ok(0)
 }

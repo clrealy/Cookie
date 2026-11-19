@@ -14,14 +14,17 @@ One app, one ordinary desktop window. No Android home screen in the way.
 
 > ## ⚠️ Work in progress — nothing here is finished
 >
-> Cookie is at **milestone 3 of 4**. Today it is a friendlier front end over
-> [Waydroid](https://waydro.id/), which does the actual Android running. The
+> Cookie is at **milestone 4 of 4**, and milestone 4 is only *started*.
+>
+> Running apps today still goes through [Waydroid](https://waydro.id/). The
 > commands work, the `.cpk` format is real, double-clicking a cookie runs it,
 > installed apps appear in your application menu, updates keep your data, and
 > `cookie burnt` will tell you honestly what your machine is missing.
 >
-> **What does not exist yet:** Cookie's own runtime — the oven — replacing
-> Waydroid (milestone 4).
+> **Cookie's own runtime — the oven — can prepare and boot an Android
+> container, but it cannot show an app's window yet.** That needs a display
+> bridge, which is the largest single piece Waydroid provides and the next
+> thing to build. See **[docs/oven.md](docs/oven.md)**.
 >
 > Expect rough edges. Expect the `.cpk` format to gain fields. Do not put
 > anything you care about in here yet.
@@ -316,6 +319,19 @@ cookie oven status --verbose   # plus the raw backend output
 One oven is shared by every app, so the cost of the Android runtime is paid
 once no matter how many cookies you have.
 
+These also drive **Cookie's own runtime**, which is being built behind
+`--backend oven`:
+
+```sh
+cookie oven image add system.img       # register a system image
+cookie oven image                      # show what is registered
+cookie oven recipe                     # print the container configuration
+cookie oven status --backend oven      # how the oven is doing
+cookie burnt  --backend oven           # the full check, oven included
+```
+
+It cannot run apps yet — see below.
+
 ### `cookie toss` — uninstall
 
 ```sh
@@ -374,6 +390,57 @@ not.
 
 ---
 
+## Cookie's own runtime, so far
+
+Milestone 4 is **started, not finished**. What the oven does today:
+
+| Piece | State |
+|---|---|
+| Shared system image — register, check, mount | ✅ |
+| binderfs — detect, mount, expose devices | ✅ |
+| Container configuration and lifecycle | ✅ |
+| Install, remove and list apps | ✅ |
+| **App windows on your desktop** | ❌ **not built** |
+
+An Android app does not draw to a window — it hands buffers to SurfaceFlinger,
+which composites them through a hardware composer that expects to end at a
+display. Getting those surfaces into Wayland windows means writing a
+hardware-composer implementation that is itself a Wayland client. That is the
+largest single thing Waydroid provides, and Cookie does not have its own yet.
+
+So the oven says so rather than appearing to work:
+
+```
+$ cookie burnt --backend oven
+  ✔ system image  ~/android/system.img (ext4, 2.1 GiB)
+  ✔ container engine  lxc is installed
+  ✘ display bridge  not built yet, so the oven cannot show an app's window
+```
+
+**The oven replaces Waydroid, not LXC.** Waydroid is a whole session manager —
+image handling, properties, window plumbing, its own daemon — and that is the
+part worth owning, because it decides how an app feels on the desktop. Running
+a container is not that part, LXC already does it well, and it has no opinion
+about your init system. Cookie owns the image, binderfs, the configuration,
+the lifecycle and the app commands; `cookie oven recipe` prints the entirety of
+what Cookie asks of LXC.
+
+**Cookie does not download a system image.** Which Android build to trust is
+your call. Hand it one and Cookie checks it:
+
+```sh
+cookie oven image add /path/to/system.img
+```
+
+Most downloads are Android *sparse* images, which cannot be mounted directly —
+Cookie recognises them and tells you the `simg2img` command rather than
+failing obscurely.
+
+The full picture, including why the display bridge is hard and what comes
+next, is in **[docs/oven.md](docs/oven.md)**.
+
+---
+
 ## Where things live
 
 Everything is under the XDG base directories in your home. Nothing Cookie
@@ -389,6 +456,7 @@ writes needs root.
 | `~/.local/share/mime/packages/cookie.xml` | The `.cpk` file type definition |
 | `~/.local/share/icons/hicolor/` | Cookie's icon, and each app's |
 | `~/.config/mimeapps.list` | Which application opens a `.cpk` |
+| `~/.local/share/cookie/oven/` | The oven: its registered image, container config and Android state |
 
 Every one of those is written by `cookie kitchen setup` and removed by
 `cookie kitchen remove`. Cookie only ever deletes `.desktop` files carrying
@@ -430,17 +498,21 @@ The full specification is in **[docs/cpk-spec.md](docs/cpk-spec.md)**.
 | **1** | `bake`, `eat`, `jar`, `crumbs`, `burnt`, `oven`, `toss` on a Waydroid backend | ✅ done |
 | **2** | `application/x-cookie-package` MIME type, `.desktop` launchers with icons, double-click to run | ✅ done |
 | **3** | In-place updates that keep app data when signatures match, and warn loudly when they do not | ✅ done |
-| **4** | **The oven**: Cookie's own runtime — container setup, binderfs mounting, one shared Android image — replacing Waydroid | ⬜ next |
+| **4** | **The oven**: Cookie's own runtime — container setup, binderfs mounting, one shared Android image — replacing Waydroid | 🟡 started |
 
-The backend already sits behind a trait (`AndroidBackend`), so milestone 4 is
-a new implementation rather than a rewrite.
+Milestone 4's remaining work, in order: the display bridge, binder device
+allocation, and Android properties. See [docs/oven.md](docs/oven.md).
+
+The backend sits behind a trait (`AndroidBackend`), so the oven is a second
+implementation rather than a rewrite — both are selectable today with
+`--backend`.
 
 ---
 
 ## Development
 
 ```sh
-cargo test                              # 214 tests
+cargo test                              # 277 tests
 cargo clippy --all-targets              # clean
 cargo fmt --check                       # clean
 python3 tests/fixtures/make_fixtures.py # regenerate the test APKs
@@ -475,6 +547,9 @@ rather than verifying the signature.
   bounds-checked, and a malformed file produces an error, never a panic.
 - "Cannot tell" is never silently treated as "fine". An unreadable signature
   warns; it does not pass.
+- Unfinished work says it is unfinished. The oven cannot show a window, so it
+  reports that in `burnt` and refuses `launch` with an explanation, rather
+  than failing in a way that looks like a bug.
 - Never assume systemd.
 - `sudo` only when it is genuinely required, and always with the reason.
 - Cookie reads files the user gives it. It downloads nothing.

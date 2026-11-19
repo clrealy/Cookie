@@ -5,6 +5,7 @@
 //! `waydroid` directly.
 
 pub mod cmd;
+pub mod oven;
 pub mod waydroid;
 
 use std::path::PathBuf;
@@ -93,6 +94,20 @@ pub struct LogSpec {
     pub lines: usize,
 }
 
+/// Something a backend wants `cookie burnt` to report about itself.
+///
+/// Keeps `health` from having to know what any particular backend is made
+/// of: it asks, and prints what comes back.
+#[derive(Debug, Clone)]
+pub struct BackendNote {
+    pub label: String,
+    pub detail: String,
+    /// What to do about it, when there is something to do.
+    pub advice: Option<String>,
+    /// Does this stop apps from running?
+    pub blocking: bool,
+}
+
 /// The operations Cookie needs from an Android runtime.
 pub trait AndroidBackend {
     /// Short name, e.g. `waydroid`.
@@ -139,6 +154,12 @@ pub trait AndroidBackend {
     /// Whether ARM code can run on this host under the backend.
     /// `None` means we could not tell.
     fn arm_translation(&self) -> Result<Option<ArmTranslation>>;
+
+    /// Anything this backend wants `cookie burnt` to say about it, beyond
+    /// the checks every backend shares.
+    fn health_notes(&self) -> Vec<BackendNote> {
+        Vec::new()
+    }
 
     /// The Wayland app id, or X11 window class, that this backend gives an
     /// app's windows.
@@ -218,20 +239,77 @@ pub fn explain_install_failure(output: &str) -> Option<&'static str> {
         .map(|(_, explanation)| *explanation)
 }
 
+/// Backend names Cookie accepts on the command line.
+pub const BACKEND_NAMES: &[&str] = &["auto", "waydroid", "oven"];
+
+/// Check a `--backend` value without building the backend.
+///
+/// Called once for every command, including the ones that never touch a
+/// runtime, so a typo is caught there too rather than silently ignored.
+pub fn validate_name(name: &str) -> Result<()> {
+    if BACKEND_NAMES.contains(&name) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "unknown backend `{name}`.\n\
+         Available backends:\n  \
+         waydroid   the default, and the one that runs apps today\n  \
+         oven       Cookie's own runtime, still being built"
+    )
+}
+
 /// Pick a backend.
 ///
 /// There is one for now. When the oven lands, this is where the choice gets
 /// made, and `--backend` on the command line overrides it.
 pub fn detect(preference: Option<&str>) -> Result<Box<dyn AndroidBackend>> {
     match preference {
+        // Waydroid stays the default. The oven can prepare and boot a
+        // container but cannot show an app's window yet, so choosing it has
+        // to be deliberate.
         None | Some("auto") | Some("waydroid") => Ok(Box::new(waydroid::Waydroid::new())),
-        Some("oven") => anyhow::bail!(
-            "the oven is not built yet, so there is nothing to switch to.\n\
-             It arrives in milestone 4; until then Cookie uses Waydroid."
-        ),
+        Some("oven") => Ok(Box::new(oven::Oven::new()?)),
         Some(other) => anyhow::bail!(
             "unknown backend `{other}`.\n\
-             Available backends: waydroid"
+             Available backends:\n  \
+             waydroid   the default, and the one that runs apps today\n  \
+             oven       Cookie's own runtime, still being built"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_backend_names_are_accepted() {
+        for name in BACKEND_NAMES {
+            assert!(validate_name(name).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_typo_is_caught_and_the_alternatives_listed() {
+        let err = validate_name("waydroud").unwrap_err().to_string();
+        assert!(err.contains("unknown backend `waydroud`"), "{err}");
+        assert!(err.contains("waydroid"), "{err}");
+        assert!(err.contains("oven"), "{err}");
+    }
+
+    #[test]
+    fn every_valid_name_actually_resolves() {
+        for name in BACKEND_NAMES {
+            // `validate_name` must not accept something `detect` rejects.
+            assert!(
+                detect(Some(name)).is_ok(),
+                "{name} validated but did not resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn install_failures_without_a_known_code_are_left_alone() {
+        assert_eq!(explain_install_failure("something else entirely"), None);
     }
 }
