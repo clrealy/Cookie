@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::backend::cmd;
+use crate::privilege;
 use crate::system::{self, BinderSupport};
 
 /// Where Cookie mounts binderfs when it has to mount it itself.
@@ -115,23 +116,13 @@ pub fn mount_command(mount_point: &Path) -> Vec<String> {
 }
 
 /// Are we already root?
-pub fn running_as_root() -> bool {
-    // Reading the status file avoids pulling in libc for one number.
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find_map(|line| line.strip_prefix("Uid:"))
-                .and_then(|values| values.split_whitespace().next().map(str::to_string))
-        })
-        .map(|uid| uid == "0")
-        .unwrap_or(false)
-}
+pub use crate::privilege::running_as_root;
 
 /// Mount binderfs, asking for root only if we do not already have it.
 ///
 /// Returns the mount point. Mounting an already-mounted binderfs is a no-op.
 pub fn ensure_mounted(mount_point: &Path) -> Result<PathBuf> {
+    let su = crate::privilege::name();
     match state() {
         BinderState::Ready { mount_point } => return Ok(mount_point),
         BinderState::LegacyDevices { .. } => {
@@ -142,7 +133,7 @@ pub fn ensure_mounted(mount_point: &Path) -> Result<PathBuf> {
         BinderState::NeedsModule => bail!(
             "A binder module is installed but not loaded. Cookie does not load kernel modules \
              for you. Load it with:\n  \
-             sudo modprobe binder_linux\n\
+             {su} modprobe binder_linux\n\
              To load it at every boot, add `binder_linux` to your module list — on OpenRC that \
              is /etc/modules-load.d/binder.conf.\n\
              Then: cookie oven start"
@@ -155,29 +146,29 @@ pub fn ensure_mounted(mount_point: &Path) -> Result<PathBuf> {
     }
 
     let command = mount_command(mount_point);
-    let as_root = running_as_root();
 
-    let (program, arguments): (&str, Vec<&str>) = if as_root {
-        ("mount", command[1..].iter().map(String::as_str).collect())
-    } else {
+    if !privilege::running_as_root() {
         crate::ui::step(&format!(
             "mounting binderfs at {} — this needs root, because mounting a filesystem does",
             mount_point.display()
         ));
-        crate::ui::note(&crate::ui::dim(&format!("  sudo {}", command.join(" "))));
-        ("sudo", command.iter().map(String::as_str).collect())
-    };
+        crate::ui::note(&crate::ui::dim(&format!(
+            "  {}",
+            privilege::hint(&command.join(" "))
+        )));
+    }
 
-    let out = cmd::run(program, &arguments)
+    let arguments: Vec<&str> = command[1..].iter().map(String::as_str).collect();
+    let out = privilege::run_as_root(&command[0], &arguments)
         .with_context(|| format!("cannot run `{}`", command.join(" ")))?;
 
     if !out.ok() {
         bail!(
             "could not mount binderfs at {}:\n{}\n\n\
-             Run it yourself to see more:\n  sudo {}",
+             Run it yourself to see more:\n  {}",
             mount_point.display(),
             cmd::indent(&out.message()),
-            command.join(" ")
+            privilege::hint(&command.join(" "))
         );
     }
 
@@ -204,13 +195,13 @@ pub fn ensure_mounted(mount_point: &Path) -> Result<PathBuf> {
 }
 
 fn create_mount_point(mount_point: &Path) -> Result<()> {
-    if running_as_root() {
+    if privilege::running_as_root() {
         std::fs::create_dir_all(mount_point)
             .with_context(|| format!("cannot create {}", mount_point.display()))?;
         return Ok(());
     }
     let path = mount_point.display().to_string();
-    let out = cmd::run("sudo", &["mkdir", "-p", &path])
+    let out = privilege::run_as_root("mkdir", &["-p", &path])
         .with_context(|| format!("cannot create {path}"))?;
     if !out.ok() {
         bail!(

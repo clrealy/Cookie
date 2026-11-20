@@ -27,6 +27,7 @@ use super::binder;
 use super::image::Image;
 use crate::backend::cmd;
 use crate::paths;
+use crate::privilege;
 use crate::ui;
 
 /// Where the pieces of the container root live.
@@ -112,24 +113,21 @@ pub fn is_mounted(path: &Path) -> bool {
 
 /// Run a mount command, asking for root only when we do not already have it.
 fn run_mount(arguments: &[String], what: &str) -> Result<()> {
-    let as_root = binder::running_as_root();
-    if !as_root {
-        ui::note(&ui::dim(&format!("  sudo {}", arguments.join(" "))));
+    if !privilege::running_as_root() {
+        ui::note(&ui::dim(&format!(
+            "  {}",
+            privilege::hint(&arguments.join(" "))
+        )));
     }
 
-    let (program, args): (&str, Vec<&str>) = if as_root {
-        ("mount", arguments[1..].iter().map(String::as_str).collect())
-    } else {
-        ("sudo", arguments.iter().map(String::as_str).collect())
-    };
-
-    let out = cmd::run(program, &args)?;
+    let args: Vec<&str> = arguments[1..].iter().map(String::as_str).collect();
+    let out = privilege::run_as_root(&arguments[0], &args)?;
     if !out.ok() {
         bail!(
             "could not mount {what}:\n{}\n\n\
-             Run it yourself to see more:\n  sudo {}",
+             Run it yourself to see more:\n  {}",
             cmd::indent(&out.message()),
-            arguments.join(" ")
+            privilege::hint(&arguments.join(" "))
         );
     }
     Ok(())
@@ -268,18 +266,13 @@ pub fn assemble(layers: &Layers, system: &Image, vendor: Option<&Image>) -> Resu
 /// is busy is reported rather than forced.
 pub fn disassemble(layers: &Layers) -> Vec<String> {
     let mut problems = Vec::new();
-    let as_root = binder::running_as_root();
 
     for target in layers.mount_points() {
         if !is_mounted(&target) {
             continue;
         }
         let path = target.display().to_string();
-        let result = if as_root {
-            cmd::run("umount", &[path.as_str()])
-        } else {
-            cmd::run("sudo", &["umount", path.as_str()])
-        };
+        let result = privilege::run_as_root("umount", &[path.as_str()]);
         match result {
             Ok(out) if out.ok() => {}
             Ok(out) => problems.push(format!("{path}: {}", out.message())),

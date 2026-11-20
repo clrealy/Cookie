@@ -392,15 +392,16 @@ impl AndroidBackend for Oven {
     }
 
     fn ensure_available(&self) -> Result<()> {
+        let su = crate::privilege::name();
         let readiness = self.readiness();
 
         if !readiness.lxc_installed {
             bail!(
                 "the oven runs the Android container with LXC, which is not installed.\n\
                  Install it with your package manager, for example:\n  \
-                 Gentoo:  sudo emerge --ask app-containers/lxc\n  \
-                 Arch:    sudo pacman -S lxc\n  \
-                 Debian:  sudo apt install lxc\n\
+                 Gentoo:  {su} emerge --ask app-containers/lxc\n  \
+                 Arch:    {su} pacman -S lxc\n  \
+                 Debian:  {su} apt install lxc\n\
                  \n\
                  The oven replaces Waydroid, not LXC: Cookie owns the image, binder, \
                  configuration and lifecycle, and LXC is the engine underneath."
@@ -820,9 +821,11 @@ impl AndroidBackend for Oven {
                 "lxc is not installed".to_string()
             },
             advice: (!readiness.lxc_installed).then(|| {
-                "The oven runs the container with LXC. Install it, for example:\n  \
-                 sudo emerge --ask app-containers/lxc"
-                    .to_string()
+                let su = crate::privilege::name();
+                format!(
+                    "The oven runs the container with LXC. Install it, for example:\n  \
+                     {su} emerge --ask app-containers/lxc"
+                )
             }),
             blocking: !readiness.lxc_installed,
         });

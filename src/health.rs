@@ -114,6 +114,7 @@ pub fn run(backend: &dyn AndroidBackend) -> Result<Report> {
 /// Cookie never builds or ships a kernel module. If binder is missing, the
 /// only honest answer is which config options to turn on.
 fn check_kernel_binder() -> Check {
+    let su = crate::privilege::name();
     let support = system::binder_support();
     let release = system::kernel_release().unwrap_or_else(|| "unknown".to_string());
 
@@ -125,7 +126,7 @@ fn check_kernel_binder() -> Check {
          CONFIG_ANDROID_BINDERFS=y     (or =m)\n\
          On Gentoo:\n  \
          Device Drivers -> Android -> Android Drivers\n  \
-         sudo make menuconfig && sudo make && sudo make modules_install && sudo make install\n\
+         {su} make menuconfig && {su} make && {su} make modules_install && {su} make install\n\
          Some distributions ship it as a separate package instead, such as \
          `binder_linux-dkms` on Debian or `binder_linux-dkms` from the AUR."
     );
@@ -152,7 +153,7 @@ fn check_kernel_binder() -> Check {
             "kernel binder support",
             "a binder module is installed but not loaded",
             "Load it now:\n  \
-             sudo modprobe binder_linux\n\
+             {su} modprobe binder_linux\n\
              To load it at every boot, add `binder_linux` to your module list \
              (on OpenRC that is /etc/modules-load.d/binder.conf).",
         );
@@ -196,7 +197,7 @@ fn check_binderfs_mount() -> Check {
             "The backend mounts it on start, so this usually sorts itself out:\n  \
              cookie oven start\n\
              To mount it by hand:\n  \
-             sudo mkdir -p /dev/binderfs && sudo mount -t binder binder /dev/binderfs",
+             {su} mkdir -p /dev/binderfs && {su} mount -t binder binder /dev/binderfs",
         ),
         None => Check::warn(
             "binderfs mount",
@@ -247,16 +248,19 @@ fn check_display() -> Check {
 
 /// Is there a GPU render node for hardware acceleration?
 fn check_gpu() -> Check {
+    let su = crate::privilege::name();
     let nodes = system::render_nodes();
     if nodes.is_empty() {
         return Check::warn(
             "gpu",
             "no render node under /dev/dri",
-            "Apps will fall back to software rendering, which is slow but works.\n\
-             If you have a GPU, make sure its driver is loaded and that you are in the \
-             `video` or `render` group:\n  \
-             sudo usermod -aG video,render $USER\n\
-             Then log out and back in.",
+            format!(
+                "Apps will fall back to software rendering, which is slow but works.\n\
+                 If you have a GPU, make sure its driver is loaded and that you are in the \
+                 `video` or `render` group:\n  \
+                 {su} usermod -aG video,render $USER\n\
+                 Then log out and back in."
+            ),
         );
     }
 
@@ -279,9 +283,11 @@ fn check_gpu() -> Check {
         Check::warn(
             "gpu",
             format!("{} present but not readable by you", names.join(", ")),
-            "Add yourself to the render group so the Android runtime can use the GPU:\n  \
-             sudo usermod -aG video,render $USER\n\
-             Then log out and back in.",
+            format!(
+                "Add yourself to the render group so the Android runtime can use the GPU:\n  \
+                 {su} usermod -aG video,render $USER\n\
+                 Then log out and back in."
+            ),
         )
     }
 }
@@ -341,7 +347,7 @@ fn check_oven(backend: &dyn AndroidBackend) -> Check {
             "oven",
             "the Android image has never been set up",
             "This downloads a system image and needs root, so run it once yourself:\n  \
-             sudo waydroid init\n\
+             {su} waydroid init\n\
              Add `-s GAPPS` if you want Google apps. Then: cookie oven start",
         ),
         OvenState::NotInstalled => Check::fail(

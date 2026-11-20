@@ -91,6 +91,13 @@ Cookie works the same under **OpenRC, systemd, runit and s6**. It never calls
 `systemctl`; when a service needs starting it prints the command for the init
 system you actually run.
 
+It uses **`doas`** wherever it would otherwise use `sudo`, if that is what
+your system has — both for the three things that genuinely need root
+(mounting binderfs and the two images) and for the commands it tells you to
+run, since advice naming a program you have not got is no advice at all.
+`doas` wins when both are installed, because installing it is a deliberate
+act; `COOKIE_ELEVATE=sudo` overrides that.
+
 ### Build it
 
 ```sh
@@ -548,7 +555,7 @@ implementation rather than a rewrite — both are selectable today with
 ## Development
 
 ```sh
-cargo test                              # 332 tests
+cargo test                              # 345 tests
 cargo clippy --all-targets              # clean
 cargo fmt --check                       # clean
 python3 tests/fixtures/make_fixtures.py # regenerate the test APKs
@@ -590,7 +597,8 @@ rather than verifying the signature.
   confined to one function, and the struct layout and ioctl number are
   asserted against the kernel ABI in tests.
 - Never assume systemd.
-- `sudo` only when it is genuinely required, and always with the reason.
+- `sudo` only when it is genuinely required, and always with the reason — and
+  it is `doas` on a system that has that instead.
 - Cookie reads files the user gives it. It downloads nothing.
 
 ---

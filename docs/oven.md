@@ -253,6 +253,12 @@ Mounting binderfs needs root, because mounting a filesystem does. Cookie
 prints the exact command before asking for it, and runs that one command — it
 keeps no privileged helper around.
 
+It asks with **`doas`** if that is what the system has, falling back to
+`sudo`, and names the same one in its advice. `COOKIE_ELEVATE=sudo` or
+`COOKIE_ELEVATE=doas` settles it by hand. With neither installed and not
+running as root, Cookie says so and prints the command for you to run
+yourself rather than failing obscurely.
+
 ### Creating the devices
 
 A freshly mounted binderfs contains only `binder-control`. The devices an

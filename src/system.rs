@@ -30,11 +30,12 @@ impl InitSystem {
 
     /// The command that starts a system service here, for use in advice.
     pub fn start_service_hint(self, service: &str) -> String {
+        let su = crate::privilege::name();
         match self {
-            InitSystem::Systemd => format!("sudo systemctl start {service}"),
-            InitSystem::OpenRc => format!("sudo rc-service {service} start"),
-            InitSystem::Runit => format!("sudo sv up {service}"),
-            InitSystem::S6 => format!("sudo s6-rc -u change {service}"),
+            InitSystem::Systemd => format!("{su} systemctl start {service}"),
+            InitSystem::OpenRc => format!("{su} rc-service {service} start"),
+            InitSystem::Runit => format!("{su} sv up {service}"),
+            InitSystem::S6 => format!("{su} s6-rc -u change {service}"),
             InitSystem::Unknown => {
                 format!("start the `{service}` service however your system does it")
             }
@@ -43,13 +44,14 @@ impl InitSystem {
 
     /// The command that makes a service start at boot.
     pub fn enable_service_hint(self, service: &str) -> String {
+        let su = crate::privilege::name();
         match self {
-            InitSystem::Systemd => format!("sudo systemctl enable --now {service}"),
-            InitSystem::OpenRc => format!("sudo rc-update add {service} default"),
+            InitSystem::Systemd => format!("{su} systemctl enable --now {service}"),
+            InitSystem::OpenRc => format!("{su} rc-update add {service} default"),
             InitSystem::Runit => {
-                format!("sudo ln -s /etc/sv/{service} /var/service/")
+                format!("{su} ln -s /etc/sv/{service} /var/service/")
             }
-            InitSystem::S6 => format!("sudo s6-rc-bundle-update add default {service}"),
+            InitSystem::S6 => format!("{su} s6-rc-bundle-update add default {service}"),
             InitSystem::Unknown => {
                 format!("enable the `{service}` service however your system does it")
             }
@@ -392,17 +394,38 @@ mod tests {
 
     #[test]
     fn init_hints_never_assume_systemd() {
+        let su = crate::privilege::name();
         assert_eq!(
             InitSystem::OpenRc.start_service_hint("waydroid-container"),
-            "sudo rc-service waydroid-container start"
+            format!("{su} rc-service waydroid-container start")
         );
         assert_eq!(
             InitSystem::OpenRc.enable_service_hint("waydroid-container"),
-            "sudo rc-update add waydroid-container default"
+            format!("{su} rc-update add waydroid-container default")
         );
         assert!(InitSystem::Unknown
             .start_service_hint("x")
             .contains("however your system does it"));
+    }
+
+    /// The hints have to name a program the user actually has. On a system
+    /// with doas and no sudo, advice saying "sudo" is no advice at all.
+    #[test]
+    fn init_hints_name_whichever_privilege_command_is_here() {
+        let su = crate::privilege::name();
+        assert!(["doas", "sudo"].contains(&su));
+
+        for hint in [
+            InitSystem::Systemd.start_service_hint("x"),
+            InitSystem::OpenRc.start_service_hint("x"),
+            InitSystem::Runit.start_service_hint("x"),
+            InitSystem::Systemd.enable_service_hint("x"),
+            InitSystem::OpenRc.enable_service_hint("x"),
+        ] {
+            assert!(hint.starts_with(su), "{hint}");
+            // And no leftover placeholder.
+            assert!(!hint.contains("{su}"), "{hint}");
+        }
     }
 
     #[test]

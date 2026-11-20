@@ -57,6 +57,7 @@ impl Waydroid {
 
     /// Run a `waydroid` subcommand and fail loudly on a non-zero exit.
     fn waydroid_checked(&self, args: &[&str]) -> Result<cmd::Output> {
+        let su = crate::privilege::name();
         let out = self.waydroid(args)?;
         if out.ok() {
             return Ok(out);
@@ -66,7 +67,7 @@ impl Waydroid {
             bail!(
                 "`waydroid {}` was refused:\n{}\n\n\
                  Waydroid wants root for this one. Try:\n  \
-                 sudo waydroid {}",
+                 {su} waydroid {}",
                 args.join(" "),
                 cmd::indent(&message),
                 args.join(" ")
@@ -202,6 +203,7 @@ impl Waydroid {
         staged: &[(String, u64, String)],
         options: &InstallOptions,
     ) -> Result<()> {
+        let su = crate::privilege::name();
         let total: u64 = staged.iter().map(|(_, size, _)| size).sum();
         let total_str = total.to_string();
 
@@ -223,7 +225,7 @@ impl Waydroid {
                 bail!(
                     "could not talk to the Android package manager:\n{}\n\n\
                      `waydroid shell` needs more privilege on this system. Try:\n  \
-                     sudo waydroid shell -- pm install-create\n\
+                     {su} waydroid shell -- pm install-create\n\
                      If that works, re-run the install with sudo.",
                     cmd::indent(&message)
                 );
@@ -324,17 +326,18 @@ impl AndroidBackend for Waydroid {
     }
 
     fn ensure_available(&self) -> Result<()> {
+        let su = crate::privilege::name();
         if self.binary().is_some() {
             return Ok(());
         }
         bail!(
             "Waydroid is not installed, and milestone 1 of Cookie runs on top of it.\n\
              Install it with your package manager, for example:\n  \
-             Gentoo:  sudo emerge --ask app-emulation/waydroid\n  \
-             Arch:    sudo pacman -S waydroid\n  \
-             Debian:  sudo apt install waydroid\n\
+             Gentoo:  {su} emerge --ask app-emulation/waydroid\n  \
+             Arch:    {su} pacman -S waydroid\n  \
+             Debian:  {su} apt install waydroid\n\
              Then set up its Android image once:\n  \
-             sudo waydroid init\n\
+             {su} waydroid init\n\
              Check how things stand with:\n  cookie burnt"
         )
     }
@@ -392,6 +395,7 @@ impl AndroidBackend for Waydroid {
     }
 
     fn start(&self) -> Result<()> {
+        let su = crate::privilege::name();
         self.ensure_available()?;
         let status = self.status()?;
 
@@ -402,7 +406,7 @@ impl AndroidBackend for Waydroid {
             bail!(
                 "Waydroid's Android image has not been set up yet. This downloads the system \
                  image and needs root, so run it yourself once:\n  \
-                 sudo waydroid init\n\
+                 {su} waydroid init\n\
                  Add `-s GAPPS` if you want Google apps. Then: cookie oven start"
             );
         }
@@ -535,6 +539,7 @@ impl AndroidBackend for Waydroid {
     }
 
     fn logs(&self, spec: &LogSpec) -> Result<()> {
+        let su = crate::privilege::name();
         self.ensure_available()?;
 
         let mut args: Vec<String> = vec!["shell".into(), "--".into(), "logcat".into()];
@@ -621,7 +626,7 @@ impl AndroidBackend for Waydroid {
                 bail!(
                     "could not read the Android log:\n{}\n\n\
                      `waydroid shell` needs more privilege here. Try:\n  \
-                     sudo cookie crumbs {}",
+                     {su} cookie crumbs {}",
                     cmd::indent(message),
                     spec.package
                 );
