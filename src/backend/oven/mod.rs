@@ -657,7 +657,10 @@ impl AndroidBackend for Oven {
 
     fn list_installed(&self) -> Result<Vec<InstalledApp>> {
         self.ensure_available()?;
-        let out = self.attach(&["pm", "list", "packages"])?;
+        // `-3` restricts this to third-party packages. Without it the list
+        // is every system component in the image, which is not what anyone
+        // means by "installed apps".
+        let out = self.attach(&["pm", "list", "packages", "-3"])?;
         if !out.ok() {
             bail!(
                 "could not list installed apps:\n{}",
@@ -695,6 +698,24 @@ impl AndroidBackend for Oven {
              cookie crumbs {package} --backend oven",
             cmd::indent(reported.trim())
         )
+    }
+
+    fn installed_apk_paths(&self, package: &str) -> Result<Vec<PathBuf>> {
+        let out = self.attach(&["pm", "path", package])?;
+        if !out.ok() {
+            return Ok(Vec::new());
+        }
+        // The oven bind-mounts its data directory at /data in the container.
+        Ok(out
+            .stdout
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("package:"))
+            .map(str::trim)
+            .filter_map(|path| path.strip_prefix("/data/"))
+            .filter(|rest| !rest.contains("..") && !rest.starts_with('/'))
+            .map(|rest| self.dirs.data.join(rest))
+            .filter(|path| path.is_file())
+            .collect())
     }
 
     fn pid_of(&self, package: &str) -> Result<Option<u32>> {

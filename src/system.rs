@@ -83,7 +83,11 @@ fn distro_from_os_release(text: &str) -> Distro {
 /// over a shoulder may be on something else — but the one that applies here
 /// is the one at the top.
 pub fn install_advice(options: &[(Distro, String)]) -> String {
-    let here = distro();
+    install_advice_for(distro(), options)
+}
+
+/// As above, for a given distribution rather than this machine's.
+fn install_advice_for(here: Distro, options: &[(Distro, String)]) -> String {
     let width = options
         .iter()
         .map(|(d, _)| d.label().len())
@@ -115,9 +119,28 @@ pub fn install_advice(options: &[(Distro, String)]) -> String {
 /// cannot be checked the upstream instructions carry the weight instead of a
 /// package name baked into this binary years ago.
 pub fn install_guidance(package: &str, options: &[(Distro, String)], upstream: &str) -> String {
-    let here = distro();
+    install_guidance_with(
+        package_in_repositories(package),
+        distro(),
+        package,
+        options,
+        upstream,
+    )
+}
 
-    if package_in_repositories(package) == Some(false) {
+/// The wording, as a pure function of the answer.
+///
+/// Split from the lookup for the same reason the binder checks were: a test
+/// that shells out to the package manager tests this machine's package
+/// manager, and takes a second doing it.
+fn install_guidance_with(
+    available: Option<bool>,
+    here: Distro,
+    package: &str,
+    options: &[(Distro, String)],
+    upstream: &str,
+) -> String {
+    if available == Some(false) {
         // Carefully worded. A package manager that does not list something
         // may be missing it, or may just have a stale index — this container
         // reports `lxc` as absent on Debian purely because `apt update` has
@@ -141,7 +164,7 @@ pub fn install_guidance(package: &str, options: &[(Distro, String)], upstream: &
         "Install it with your package manager, for example:\n{}\n\
          If it is not in your repositories, the project's own instructions cover every \
          distribution:\n  {upstream}",
-        install_advice(options)
+        install_advice_for(here, options)
     )
 }
 
@@ -722,63 +745,122 @@ mod distro_tests {
 mod guidance_tests {
     use super::*;
 
+    fn options() -> Vec<(Distro, String)> {
+        vec![
+            (Distro::Arch, "pacman -S waydroid".to_string()),
+            (Distro::Gentoo, "emerge --ask waydroid".to_string()),
+            (Distro::Debian, "apt install waydroid".to_string()),
+        ]
+    }
+
     /// A package manager with a stale index reports things as absent that
     /// are not. The wording has to survive that, so it says what was seen
     /// rather than making a claim about the distribution.
     #[test]
     fn absence_is_reported_as_an_observation_not_a_fact() {
-        let guidance = install_guidance(
-            "definitely-not-a-real-package-xyz",
-            &[(Distro::Arch, "pacman -S x".to_string())],
+        let guidance = install_guidance_with(
+            Some(false),
+            Distro::Debian,
+            "waydroid",
+            &options(),
             "https://example.invalid/install",
         );
-
-        if guidance.contains("does not currently list") {
-            assert!(
-                guidance.contains("index needs refreshing"),
-                "a stale index is the other explanation, and must be offered:\n{guidance}"
-            );
-            assert!(
-                !guidance.contains("is not in"),
-                "that would be a claim about the distribution:\n{guidance}"
-            );
-        }
-        // Either way, upstream is named.
+        assert!(guidance.contains("does not currently list"), "{guidance}");
+        assert!(
+            guidance.contains("index needs refreshing"),
+            "the other explanation must be offered:\n{guidance}"
+        );
+        assert!(
+            !guidance.contains("is not in Debian's repositories"),
+            "that would be a claim about the distribution:\n{guidance}"
+        );
         assert!(
             guidance.contains("https://example.invalid/install"),
             "{guidance}"
         );
     }
 
-    /// The AUR exists on Arch and nowhere else, so mentioning it anywhere
-    /// else is noise at best and wrong at worst.
+    /// The AUR exists on Arch and nowhere else.
     #[test]
-    fn the_aur_is_mentioned_only_on_arch() {
-        let guidance = install_guidance(
-            "definitely-not-a-real-package-xyz",
-            &[(Distro::Arch, "pacman -S x".to_string())],
+    fn the_aur_is_mentioned_on_arch_and_only_on_arch() {
+        let on_arch = install_guidance_with(
+            Some(false),
+            Distro::Arch,
+            "waydroid",
+            &options(),
             "https://example.invalid/install",
         );
-        if distro() != Distro::Arch {
+        assert!(on_arch.contains("AUR"), "{on_arch}");
+
+        for elsewhere in [
+            Distro::Debian,
+            Distro::Gentoo,
+            Distro::Fedora,
+            Distro::Unknown,
+        ] {
+            let guidance = install_guidance_with(
+                Some(false),
+                elsewhere,
+                "waydroid",
+                &options(),
+                "https://example.invalid/install",
+            );
             assert!(
                 !guidance.contains("AUR"),
                 "the AUR has nothing to do with {}:\n{guidance}",
-                distro().label()
+                elsewhere.label()
             );
         }
     }
 
     #[test]
+    fn a_package_that_is_there_gets_the_ordinary_list() {
+        for answer in [Some(true), None] {
+            let guidance = install_guidance_with(
+                answer,
+                Distro::Arch,
+                "lxc",
+                &options(),
+                "https://example.invalid/install",
+            );
+            assert!(
+                guidance.contains("Install it with your package manager"),
+                "{guidance}"
+            );
+            // And this machine's distribution leads.
+            let first = guidance
+                .lines()
+                .find(|l| l.trim_start().starts_with("Arch:"))
+                .is_some();
+            assert!(first, "Arch should be listed:\n{guidance}");
+        }
+    }
+
+    #[test]
+    fn the_named_distribution_leads_the_list() {
+        let rendered = install_advice_for(Distro::Debian, &options());
+        let first = rendered.lines().next().unwrap_or_default();
+        assert!(first.contains("Debian"), "{rendered}");
+
+        let rendered = install_advice_for(Distro::Gentoo, &options());
+        let first = rendered.lines().next().unwrap_or_default();
+        assert!(first.contains("Gentoo"), "{rendered}");
+    }
+
+    #[test]
     fn guidance_never_carries_a_placeholder() {
-        let guidance = install_guidance(
-            "bash",
-            &[
-                (Distro::Arch, "pacman -S bash".to_string()),
-                (Distro::Debian, "apt install bash".to_string()),
-            ],
-            "https://example.invalid/install",
-        );
-        assert!(!guidance.contains("{}"), "{guidance}");
-        assert!(!guidance.contains("{su}"), "{guidance}");
+        for answer in [Some(true), Some(false), None] {
+            for here in [Distro::Arch, Distro::Debian, Distro::Unknown] {
+                let guidance = install_guidance_with(
+                    answer,
+                    here,
+                    "bash",
+                    &options(),
+                    "https://example.invalid/install",
+                );
+                assert!(!guidance.contains("{}"), "{guidance}");
+                assert!(!guidance.contains("{su}"), "{guidance}");
+            }
+        }
     }
 }

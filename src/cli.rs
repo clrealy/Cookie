@@ -56,6 +56,11 @@ pub enum Command {
     Eat(EatArgs),
 
     /// List the cookies in the jar
+    #[command(long_about = "List what Cookie has installed.\n\n\
+                            Also notices apps the Android runtime has that Cookie did not put \
+                            there — sideloaded by hand, or fetched by a store running inside \
+                            the container. Those get no launcher and `cookie crumbs` cannot \
+                            find them, so `--adopt` takes them in.")]
     Jar(JarArgs),
 
     /// Show an app's logs
@@ -157,6 +162,10 @@ pub struct JarArgs {
     /// Show packages, ABIs and install dates
     #[arg(short, long)]
     pub long: bool,
+
+    /// Take in apps the runtime has that Cookie did not install
+    #[arg(long)]
+    pub adopt: bool,
 }
 
 #[derive(Debug, Args)]

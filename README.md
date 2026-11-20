@@ -282,6 +282,7 @@ genuine.
 ```sh
 cookie jar          # names and versions
 cookie jar --long   # plus ABIs, install date and backend
+cookie jar --adopt  # take in apps Cookie did not install
 ```
 
 ```
@@ -293,6 +294,18 @@ cookie jar --long   # plus ABIs, install date and backend
 
 Anything whose native code this machine cannot run natively is flagged, so you
 know before it fails.
+
+`jar` also notices drift in both directions when the oven is running: apps the
+runtime has that Cookie never installed — sideloaded by hand, or fetched by a
+store running inside the container, like Aurora Store — and jar entries for
+apps that have since been removed behind Cookie's back.
+
+A stray gets no launcher and `cookie crumbs` cannot find it, so `--adopt`
+takes it in. Adoption reads the app's own APK back out of the container,
+which is the only place its icon, version and signer live, so the resulting
+entry is as complete as one `cookie eat` would have written. Where the APK
+cannot be reached it records the name and package id and says that is all it
+got, rather than inventing the rest.
 
 ### `cookie crumbs` — logs for one app
 
@@ -577,7 +590,7 @@ implementation rather than a rewrite — both are selectable today with
 ## Development
 
 ```sh
-cargo test                              # 357 tests
+cargo test                              # 376 tests
 cargo clippy --all-targets              # clean
 cargo fmt --check                       # clean
 python3 tests/fixtures/make_fixtures.py # regenerate the test APKs

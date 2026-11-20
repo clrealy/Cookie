@@ -534,6 +534,19 @@ impl AndroidBackend for Waydroid {
         )
     }
 
+    fn installed_apk_paths(&self, package: &str) -> Result<Vec<PathBuf>> {
+        let out = self.shell(&["pm", "path", package])?;
+        if !out.ok() {
+            return Ok(Vec::new());
+        }
+        // Waydroid shares the container's /data at this path on the host.
+        let data = match dirs::data_dir() {
+            Some(base) => base.join("waydroid/data"),
+            None => return Ok(Vec::new()),
+        };
+        Ok(host_paths_from_pm(&out.stdout, &data))
+    }
+
     fn pid_of(&self, package: &str) -> Result<Option<u32>> {
         let out = self.shell(&["pidof", package])?;
         if !out.ok() {
@@ -727,6 +740,25 @@ impl AndroidBackend for Waydroid {
             implementation: None,
         }))
     }
+}
+
+/// Turn `pm path` output into host paths.
+///
+/// `pm path` prints `package:/data/app/.../base.apk`, one per line, with the
+/// paths as Android sees them. Only the ones under `/data` can be reached
+/// from the host, since that is the part the backend shares.
+fn host_paths_from_pm(output: &str, host_data: &Path) -> Vec<PathBuf> {
+    output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("package:"))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .filter_map(|path| path.strip_prefix("/data/"))
+        // A path escaping the shared directory is not one we will read.
+        .filter(|rest| !rest.contains("..") && !rest.starts_with('/'))
+        .map(|rest| host_data.join(rest))
+        .filter(|path| path.is_file())
+        .collect()
 }
 
 /// Pull the value out of a `Key:\tValue` status line.

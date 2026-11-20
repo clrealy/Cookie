@@ -140,6 +140,19 @@ pub trait AndroidBackend {
     /// Launch an app in its own window.
     fn launch(&self, package: &str) -> Result<()>;
 
+    /// Where an installed app's APKs are, as paths on the *host*.
+    ///
+    /// Android keeps them inside the container, but every backend bind-mounts
+    /// that storage from somewhere reachable, so they can be read back out.
+    /// This is what lets Cookie adopt an app it did not install: the APK is
+    /// the only place its icon, version and signer actually live.
+    ///
+    /// An empty list means the backend could not say, which callers treat as
+    /// "adopt with less detail" rather than as a failure.
+    fn installed_apk_paths(&self, _package: &str) -> Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
+
     /// Find a running process id for a package, if it has one.
     fn pid_of(&self, package: &str) -> Result<Option<u32>>;
 

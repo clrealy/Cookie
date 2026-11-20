@@ -12,6 +12,7 @@
 //! - [`jar`] remembers what is installed.
 //! - [`health`] is `cookie burnt`.
 
+pub mod adopt;
 pub mod apk;
 pub mod assets;
 pub mod backend;
@@ -49,7 +50,7 @@ pub fn run(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Command::Jar(args) => {
-            commands::jar::run(args)?;
+            commands::jar::run(args, backend_name)?;
             Ok(0)
         }
         Command::Crumbs(args) => {
