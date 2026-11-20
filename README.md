@@ -8,11 +8,6 @@
 
 One app, one ordinary desktop window. No Android home screen in the way.
 
-<a href="https://gurtproject.org/?app=cookie"><picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://gurtproject.org/assets/get-on-gurt-dark.svg">
-  <img src="https://gurtproject.org/assets/get-on-gurt.svg" alt="Get now on GURT" width="240">
-</picture></a>
-
 </div>
 
 ---
