@@ -12,7 +12,9 @@ One app, one ordinary desktop window. No Android home screen in the way.
 
 ---
 
-> ## ⚠️ Work in progress — nothing here is finished
+> ## ⚠️ DO NOT USE
+> It softlocked on our first test. Blunder. Don't use. Use protection instead.
+>
 >
 > Cookie is at **milestone 4 of 4**, and all four are built.
 >
