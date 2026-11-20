@@ -6,10 +6,10 @@ url = https://github.com/clrealy/Cookie
 license = GPL-3.0-or-later
 maintainer = clrealy
 category = system
-icon = https://raw.githubusercontent.com/clrealy/Cookie/9de6cb030eb961ea139e1a7ff0f8ea3a5baf8ab7/assets/cookie.png
+icon = https://raw.githubusercontent.com/clrealy/Cookie/e4d66f7982af3c20f9592eba5d0272d71a3af481/assets/cookie.png
 arch = x86_64
 arch = aarch64
 makedepends = rust
 makedepends = git
-source = cookie::git+https://github.com/clrealy/Cookie.git#commit=9de6cb030eb961ea139e1a7ff0f8ea3a5baf8ab7
+source = cookie::git+https://github.com/clrealy/Cookie.git#commit=e4d66f7982af3c20f9592eba5d0272d71a3af481
 alias = cpk
