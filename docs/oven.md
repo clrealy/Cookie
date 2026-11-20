@@ -2,14 +2,108 @@
 
 Cookie's own Android runtime, replacing Waydroid.
 
-**Status: the host side is complete.** The oven mounts the system image,
-mounts binderfs and creates its devices, writes the container configuration
-and the Android properties, boots the container, and installs, launches and
-logs apps. Whether a window actually appears depends on the system image —
-see *The display path* below, which is the one thing the host cannot
-determine.
+**Status: written, and known not to boot yet.**
+
+An earlier version of this file said the host side was complete. Comparing
+what Cookie generates against Waydroid's own `images.py`, `mount.py` and
+`config_base` found three things it is missing, each of which stops the
+container coming up. They are listed under *Known blockers* below, with what
+each one needs.
+
+What is right is the content: the socket path, the graphics property values,
+binderfs handling, image validation. What is wrong is the container's
+filesystem layout, and until that is fixed none of the rest gets a chance to
+run.
 
 Waydroid remains the **default** backend. `--backend oven` opts in.
+
+---
+
+## Known blockers
+
+Each of these was found by comparing against Waydroid's working
+implementation, not guessed at.
+
+### 1. One image, where two are needed
+
+Waydroid's `mount_rootfs()` mounts **two**: `system.img` as the container
+root, and `vendor.img` at `rootfs/vendor`.
+
+Cookie registers exactly one. Android's HALs live in `/vendor` — including
+the graphics ones that are the whole point — so without the vendor image
+there is nothing for SurfaceFlinger to load.
+
+**Needs:** `cookie oven image add` to take a vendor image too, and the mount
+to place it at `rootfs/vendor`.
+
+### 2. A read-only root, where a writable overlay is needed
+
+Cookie mounts the system image `-o loop,ro` and stops there. Waydroid mounts
+an overlayfs on top of it:
+
+```
+lowerdir = <overlay>:<rootfs>     upperdir = <overlay_rw>/system
+```
+
+…and the same again for `vendor`.
+
+This is not cosmetic. On a read-only root, binding onto a directory that
+already exists in the image works, but **creating** a path does not — and
+every binder device, `/dev/sw_sync` and the `/run/xdg` tmpfs that carries the
+Wayland socket are `create=file` or `create=dir` entries:
+
+```
+$ mount -o loop,ro system.img rootfs/
+$ touch rootfs/dev/binder
+touch: cannot touch 'rootfs/dev/binder': Read-only file system
+```
+
+So the display path fails for the same reason the IPC path does.
+
+**Needs:** an overlay, or at minimum a tmpfs on `/dev` — Cookie sets
+`lxc.autodev = 0` and then never mounts one.
+
+### 3. Properties written where nothing reads them
+
+Cookie writes `/data/cookie.prop`. Waydroid bind-mounts its file to
+**`/vendor/waydroid.prop`**:
+
+```python
+bind_file(args, args.work + "/waydroid.prop",
+          defaults["rootfs"] + "/vendor/waydroid.prop")
+```
+
+`/data/cookie.prop` is read by nothing, so every `ro.hardware.*` value Cookie
+works out is computed correctly and then discarded.
+
+**Needs:** the same bind, to the path the image actually reads.
+
+### Also missing, less certain
+
+- **Capabilities.** Waydroid's `config_base` keeps an explicit set of ~24
+  (`sys_admin`, `mknod`, `sys_time`, `net_admin`, `sys_ptrace` and more).
+  Cookie sets none, so the container gets LXC's default, which drops things
+  Android's init wants.
+- **`lxc.mount.auto = cgroup:ro sys:ro proc`.** Waydroid sets this; Cookie
+  leaves `/proc`, `/sys` and cgroups to LXC's defaults.
+- **Host EGL libraries.** Waydroid bind-mounts the host's `/vendor/lib/egl`
+  and `/vendor/lib64/egl` in when they exist.
+- **The device allowlist.** Cookie writes `lxc.cgroup2.devices.*`, which
+  assumes cgroup v2 and which Waydroid does not appear to do at all — its
+  `/dev` nodes come from a `config_nodes` file this comparison could not
+  read.
+- **`stop()` leaves the image mounted.** Nothing unmounts the loop device or
+  binderfs afterwards.
+
+### What this comparison could not check
+
+`config_nodes`, `config_session` and `drivers.py` were not readable, so the
+`/dev` node setup, the cgroup handling and Waydroid's own binder setup are
+unverified. There may be more.
+
+One worry turned out to be unfounded: nothing in Waydroid sets
+`androidboot.*` parameters, so the container's `/proc/cmdline` belonging to
+the host kernel is apparently not a problem.
 
 ---
 

@@ -20,13 +20,16 @@ One app, one ordinary desktop window. No Android home screen in the way.
 > it, installed apps appear in your application menu, updates keep your data,
 > and `cookie burnt` will tell you honestly what your machine is missing.
 >
-> **Cookie's own runtime — the oven — is complete on the host side** and
-> selectable with `--backend oven`. Waydroid is still the default, because
-> the oven has never been booted against real hardware: no part of this has
-> run against a kernel with binder, an Android image and a Wayland session at
-> the same time. Everything is written and tested; none of it is proven.
+> **Cookie's own runtime — the oven — is written, and known not to boot
+> yet.** Comparing it against Waydroid's own implementation turned up three
+> things it is missing: it mounts one image where two are needed, it mounts
+> that image read-only where a writable overlay is needed, and it writes
+> Android's properties where nothing reads them. Each one stops the container
+> coming up. They are itemised in **[docs/oven.md](docs/oven.md)**.
 >
-> Treat the oven as untested, and the rest as young.
+> Waydroid is the default backend and the one that runs apps.
+>
+> Treat the oven as unfinished, and the rest as young.
 >
 > Expect rough edges. Expect the `.cpk` format to gain fields. Do not put
 > anything you care about in here yet.
@@ -401,8 +404,8 @@ not.
 | binderfs — detect, mount, **create its devices** | ✅ |
 | Container configuration and lifecycle | ✅ |
 | Install, remove, list, launch and log apps | ✅ |
-| **The display path** | ✅ host side |
-| Booted against real hardware | ❌ **never** |
+| **The display path** | 🟡 computed correctly, cannot take effect yet |
+| Container actually boots | ❌ **no — three known blockers** |
 
 ### Where the Wayland client actually lives
 
@@ -522,11 +525,11 @@ The full specification is in **[docs/cpk-spec.md](docs/cpk-spec.md)**.
 | **1** | `bake`, `eat`, `jar`, `crumbs`, `burnt`, `oven`, `toss` on a Waydroid backend | ✅ done |
 | **2** | `application/x-cookie-package` MIME type, `.desktop` launchers with icons, double-click to run | ✅ done |
 | **3** | In-place updates that keep app data when signatures match, and warn loudly when they do not | ✅ done |
-| **4** | **The oven**: Cookie's own runtime — container setup, binderfs mounting, one shared Android image — replacing Waydroid | ✅ host side |
+| **4** | **The oven**: Cookie's own runtime — container setup, binderfs mounting, one shared Android image — replacing Waydroid | 🟡 written, does not boot |
 
-The oven is built and unproven. What is left is to boot it on a machine that
-has binder, an image and a Wayland session — which needs hardware, not more
-code. See [docs/oven.md](docs/oven.md).
+The oven needs a vendor image, a writable overlay, and its properties bound
+to the path the image reads. Those are specified in
+[docs/oven.md](docs/oven.md) — it needs that code, then hardware.
 
 The backend sits behind a trait (`AndroidBackend`), so the oven is a second
 implementation rather than a rewrite — both are selectable today with
