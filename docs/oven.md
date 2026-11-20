@@ -2,55 +2,44 @@
 
 Cookie's own Android runtime, replacing Waydroid.
 
-**Status: written, and known not to boot yet.**
+**Status: the three known blockers are fixed. Still never booted.**
 
-An earlier version of this file said the host side was complete. Comparing
-what Cookie generates against Waydroid's own `images.py`, `mount.py` and
-`config_base` found three things it is missing, each of which stops the
-container coming up. They are listed under *Known blockers* below, with what
-each one needs.
+An earlier version of this file claimed the host side was complete. Comparing
+what Cookie generates against Waydroid's `images.py`, `mount.py` and
+`config_base` found three things that each stopped the container coming up.
+All three are now fixed, and the fix is verified by a test that does real
+loop and overlay mounts rather than by inspection.
 
-What is right is the content: the socket path, the graphics property values,
-binderfs handling, image validation. What is wrong is the container's
-filesystem layout, and until that is fixed none of the rest gets a chance to
-run.
+What that does **not** mean is that it boots. It has never run against a
+kernel with binder, two Android images, LXC and a Wayland session at the same
+time. What is below is what is known, and what is still unknown.
 
 Waydroid remains the **default** backend. `--backend oven` opts in.
 
 ---
 
-## Known blockers
+## What was wrong, and what fixed it
 
-Each of these was found by comparing against Waydroid's working
-implementation, not guessed at.
+### 1. One image, where two are needed — fixed
 
-### 1. One image, where two are needed
+Waydroid mounts **two**: `system.img` as the container root, and
+`vendor.img` at `rootfs/vendor`. Android's HALs live in `/vendor`, the
+graphics ones included, so a system image alone boots into something with
+nothing to draw with.
 
-Waydroid's `mount_rootfs()` mounts **two**: `system.img` as the container
-root, and `vendor.img` at `rootfs/vendor`.
+`cookie oven image add` now takes both, or a directory holding both:
 
-Cookie registers exactly one. Android's HALs live in `/vendor` — including
-the graphics ones that are the whole point — so without the vendor image
-there is nothing for SurfaceFlinger to load.
-
-**Needs:** `cookie oven image add` to take a vendor image too, and the mount
-to place it at `rootfs/vendor`.
-
-### 2. A read-only root, where a writable overlay is needed
-
-Cookie mounts the system image `-o loop,ro` and stops there. Waydroid mounts
-an overlayfs on top of it:
-
-```
-lowerdir = <overlay>:<rootfs>     upperdir = <overlay_rw>/system
+```sh
+cookie oven image add ~/waydroid-images            # finds system.img and vendor.img
+cookie oven image add system.img vendor.img        # or name them
 ```
 
-…and the same again for `vendor`.
+Starting without a vendor image is refused, with both ways to fix it.
 
-This is not cosmetic. On a read-only root, binding onto a directory that
-already exists in the image works, but **creating** a path does not — and
-every binder device, `/dev/sw_sync` and the `/run/xdg` tmpfs that carries the
-Wayland socket are `create=file` or `create=dir` entries:
+### 2. A read-only root, where a writable overlay is needed — fixed
+
+The container creates device nodes and mount points inside its own root, and
+a read-only image cannot have those created in it:
 
 ```
 $ mount -o loop,ro system.img rootfs/
@@ -58,86 +47,78 @@ $ touch rootfs/dev/binder
 touch: cannot touch 'rootfs/dev/binder': Read-only file system
 ```
 
-So the display path fails for the same reason the IPC path does.
+Every binder device, `/dev/sw_sync` and the `/run/xdg` tmpfs carrying the
+Wayland socket are `create=file` or `create=dir` entries, so the display path
+failed for the same reason the IPC path did.
 
-**Needs:** an overlay, or at minimum a tmpfs on `/dev` — Cookie sets
-`lxc.autodev = 0` and then never mounts one.
+The root is now layered, as Waydroid does it:
 
-### 3. Properties written where nothing reads them
-
-Cookie writes `/data/cookie.prop`. Waydroid bind-mounts its file to
-**`/vendor/waydroid.prop`**:
-
-```python
-bind_file(args, args.work + "/waydroid.prop",
-          defaults["rootfs"] + "/vendor/waydroid.prop")
+```
+rootfs          overlay: lowerdir=overlay:rootfs, upper=overlay_rw/system
+  system.img    read-only
+rootfs/vendor   overlay: lowerdir=overlay/vendor:rootfs/vendor, upper=overlay_rw/vendor
+  vendor.img    read-only
 ```
 
-`/data/cookie.prop` is read by nothing, so every `ro.hardware.*` value Cookie
-works out is computed correctly and then discarded.
+`tests/oven.rs` mounts this for real — two loop devices, two overlays —
+creates each of the paths that used to fail, checks the writes landed in the
+upper layer rather than the image, and takes it all apart again.
 
-**Needs:** the same bind, to the path the image actually reads.
+One deliberate divergence: Waydroid's `mount_overlay` passes `ro`, which
+would defeat the purpose. Cookie mounts the overlay read-write, which is what
+makes the layer usable.
 
-### Also missing, less certain
+### 3. Properties written where nothing reads them — fixed
 
-- **Capabilities.** Waydroid's `config_base` keeps an explicit set of ~24
-  (`sys_admin`, `mknod`, `sys_time`, `net_admin`, `sys_ptrace` and more).
-  Cookie sets none, so the container gets LXC's default, which drops things
-  Android's init wants.
-- **`lxc.mount.auto = cgroup:ro sys:ro proc`.** Waydroid sets this; Cookie
-  leaves `/proc`, `/sys` and cgroups to LXC's defaults.
-- **Host EGL libraries.** Waydroid bind-mounts the host's `/vendor/lib/egl`
-  and `/vendor/lib64/egl` in when they exist.
-- **The device allowlist.** Cookie writes `lxc.cgroup2.devices.*`, which
-  assumes cgroup v2 and which Waydroid does not appear to do at all — its
-  `/dev` nodes come from a `config_nodes` file this comparison could not
-  read.
-- **`stop()` leaves the image mounted.** Nothing unmounts the loop device or
-  binderfs afterwards.
+Cookie wrote `/data/cookie.prop`. Waydroid bind-mounts its file to
+`/vendor/waydroid.prop`, which is what the image reads. Every
+`ro.hardware.*` value Cookie worked out was computed correctly and then
+discarded.
 
-### What this comparison could not check
+The file is now bound to `/vendor/waydroid.prop`. That bind is only possible
+*because* of the overlay above — on a bare read-only vendor image there would
+be nowhere to create the file.
 
-`config_nodes`, `config_session` and `drivers.py` were not readable, so the
-`/dev` node setup, the cgroup handling and Waydroid's own binder setup are
-unverified. There may be more.
+### Also fixed
 
-One worry turned out to be unfounded: nothing in Waydroid sets
-`androidboot.*` parameters, so the container's `/proc/cmdline` belonging to
-the host kernel is apparently not a problem.
+- **Capabilities.** `lxc.cap.keep` now names the set Android's init needs —
+  `sys_admin`, `mknod`, `sys_time`, `net_admin` and the rest. It is an
+  allowlist, so LXC's default was dropping them.
+- **Kernel filesystems.** `lxc.mount.auto = cgroup:ro sys:ro proc`.
+- **`/dev`.** A tmpfs, with the basic nodes bound in from the host, since
+  `lxc.autodev` is off and Android's ueventd expects somewhere to work.
+- **cgroup version.** The device allowlist key differs between hierarchies,
+  and the wrong one means no allowlist rather than an error. Cookie now
+  detects which the host uses.
+- **Host EGL libraries**, bound in when the host has them.
+- **`stop()` unmounts.** It used to leave the loop device busy and the image
+  pinned.
 
 ---
 
-## A correction
+## What is still unknown
 
-The previous version of this document said the remaining work was for Cookie
-to write "a hardware-composer implementation that is itself a Wayland
-client", and called that the largest piece Waydroid provides.
+Honestly: whether it boots.
 
-That was wrong about where the code goes, and the mistake is worth recording
-because it changed what milestone 4 even *was*.
+- **Android's init has never run under this configuration.** Everything
+  above is necessary; whether it is sufficient is not something inspection
+  can answer.
+- **Waydroid's `config_nodes` and `config_session` could not be read** (both
+  404 at the paths tried), so its `/dev` node setup and cgroup handling are
+  unverified. Cookie's approach to both is reasoned rather than copied.
+- **Waydroid ships a seccomp profile** (`waydroid.seccomp`); Cookie disables
+  seccomp entirely. That is more permissive, so it should not block boot, but
+  it is a difference.
+- **Whether a given image reads `/vendor/waydroid.prop`** is still
+  image-specific, as below.
 
-Reading Waydroid's `tools/helpers/lxc.py` settles it. The host side
-bind-mounts the desktop's Wayland socket into the container:
+If it does not boot, the configuration is at
+`~/.local/share/cookie/oven/container.conf` and this runs it in the
+foreground where the failure is visible:
 
-```python
-wayland_host_socket = os.path.realpath(os.path.join(
-    session["xdg_runtime_dir"], session["wayland_display"]))
-wayland_container_socket = os.path.join(
-    tools.config.defaults["container_xdg_runtime_dir"],      # /run/xdg
-    tools.config.defaults["container_wayland_display"])      # wayland-0
-make_entry(wayland_host_socket, wayland_container_socket[1:])
+```sh
+lxc-start -n cookie -f ~/.local/share/cookie/oven/container.conf -F
 ```
-
-…and that is the whole of it. There is no host-side compositor, no proxy, no
-socket forwarding. The host mounts a socket in and starts the container.
-
-Which means **the Wayland client is inside the Android image** — it is the
-hardware composer, compiled into the image, connecting *out* through that
-socket. The host's job is not to write one. The host's job is to put the
-socket where that HAL looks for it, pass the GPU through, and tell it which
-implementation to load.
-
-All of that is host-side, finite, and now done.
 
 ---
 

@@ -321,3 +321,140 @@ mod tests {
         assert_eq!(ImageFormat::Erofs.mount_type(), "erofs");
     }
 }
+
+/// The pair of images an Android container needs.
+///
+/// Both, not one: Android's hardware layers live in `/vendor`, the graphics
+/// ones included, so a system image on its own boots into something with
+/// nothing to draw with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageSet {
+    pub system: Image,
+    pub vendor: Option<Image>,
+}
+
+/// Conventional filenames inside an image directory.
+const SYSTEM_NAMES: &[&str] = &["system.img", "system.raw.img"];
+const VENDOR_NAMES: &[&str] = &["vendor.img", "vendor.raw.img"];
+
+/// Register one or both images.
+///
+/// `path` may be the system image itself, or a directory holding both — the
+/// way an image download usually arrives.
+pub fn register_set(path: &Path, vendor: Option<&Path>) -> Result<ImageSet> {
+    if path.is_dir() {
+        if vendor.is_some() {
+            bail!(
+                "{} is a directory, so Cookie takes both images from it.\n\
+                 Drop the second argument, or name the two image files instead.",
+                path.display()
+            );
+        }
+        return register_directory(path);
+    }
+
+    Ok(ImageSet {
+        system: register(path)?,
+        vendor: vendor.map(register).transpose()?,
+    })
+}
+
+/// Find `system.img` and `vendor.img` in a directory.
+fn register_directory(dir: &Path) -> Result<ImageSet> {
+    let find = |names: &[&str]| -> Option<PathBuf> {
+        names
+            .iter()
+            .map(|name| dir.join(name))
+            .find(|path| path.is_file())
+    };
+
+    let Some(system_path) = find(SYSTEM_NAMES) else {
+        bail!(
+            "{} has no system image in it.\n\
+             Cookie looked for: {}\n\
+             Point it at the image file itself if it is called something else.",
+            dir.display(),
+            SYSTEM_NAMES.join(", ")
+        );
+    };
+
+    let system = register(&system_path)?;
+    let vendor = match find(VENDOR_NAMES) {
+        Some(path) => Some(register(&path)?),
+        None => None,
+    };
+
+    Ok(ImageSet { system, vendor })
+}
+
+#[cfg(test)]
+mod set_tests {
+    use super::*;
+    use crate::paths::ScratchDir;
+    use std::io::Write;
+
+    fn ext4_image(path: &Path) {
+        let mut data = vec![0u8; MIN_PLAUSIBLE_SIZE as usize + 4096];
+        let at = 1024 + 0x38;
+        data[at..at + 2].copy_from_slice(&0xEF53u16.to_le_bytes());
+        let mut file = File::create(path).expect("create");
+        file.write_all(&data).expect("write");
+    }
+
+    #[test]
+    fn a_directory_with_both_images_registers_both() {
+        let scratch = ScratchDir::new("imageset").expect("scratch");
+        ext4_image(&scratch.path().join("system.img"));
+        ext4_image(&scratch.path().join("vendor.img"));
+
+        let set = register_set(scratch.path(), None).expect("register");
+        assert!(set.system.path.ends_with("system.img"));
+        assert!(
+            set.vendor.as_ref().map(|v| v.path.ends_with("vendor.img")) == Some(true),
+            "{:?}",
+            set.vendor
+        );
+    }
+
+    #[test]
+    fn a_directory_without_a_system_image_says_what_it_looked_for() {
+        let scratch = ScratchDir::new("imageset").expect("scratch");
+        let err = register_set(scratch.path(), None).unwrap_err().to_string();
+        assert!(err.contains("no system image"), "{err}");
+        assert!(err.contains("system.img"), "{err}");
+    }
+
+    #[test]
+    fn a_directory_with_only_a_system_image_registers_what_is_there() {
+        let scratch = ScratchDir::new("imageset").expect("scratch");
+        ext4_image(&scratch.path().join("system.img"));
+        let set = register_set(scratch.path(), None).expect("register");
+        assert!(set.vendor.is_none());
+    }
+
+    #[test]
+    fn two_files_can_be_named_explicitly() {
+        let scratch = ScratchDir::new("imageset").expect("scratch");
+        let system = scratch.path().join("a.img");
+        let vendor = scratch.path().join("b.img");
+        ext4_image(&system);
+        ext4_image(&vendor);
+
+        let set = register_set(&system, Some(&vendor)).expect("register");
+        assert!(set.system.path.ends_with("a.img"));
+        assert!(set.vendor.is_some());
+    }
+
+    #[test]
+    fn a_directory_plus_a_second_argument_is_refused_as_ambiguous() {
+        let scratch = ScratchDir::new("imageset").expect("scratch");
+        ext4_image(&scratch.path().join("system.img"));
+        let other = scratch.path().join("other.img");
+        ext4_image(&other);
+
+        let err = register_set(scratch.path(), Some(&other))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("takes both images from it"), "{err}");
+    }
+}

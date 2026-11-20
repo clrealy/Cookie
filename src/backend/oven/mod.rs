@@ -25,6 +25,7 @@ pub mod binder;
 pub mod container;
 pub mod display;
 pub mod image;
+pub mod mount;
 pub mod props;
 
 use std::fs;
@@ -80,9 +81,15 @@ impl OvenDirs {
 /// What the oven remembers between runs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OvenRecord {
-    /// The registered system image, if one has been added.
+    /// The registered system image. `alias` keeps records written before
+    /// the vendor image existed readable.
+    #[serde(alias = "image", skip_serializing_if = "Option::is_none", default)]
+    pub system: Option<Image>,
+
+    /// The vendor image. Android's hardware layers live in `/vendor`, so the
+    /// container cannot boot without it.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub image: Option<Image>,
+    pub vendor: Option<Image>,
 
     /// Properties the user has set, applied over the ones Cookie computes.
     ///
@@ -98,6 +105,8 @@ pub struct Readiness {
     pub lxc_installed: bool,
     pub binder: BinderState,
     pub image: Option<Image>,
+    /// The vendor image. Without it there are no hardware layers to load.
+    pub vendor: Option<Image>,
     /// Whether there is a Wayland session to draw into, and what graphics
     /// implementation the Android side should load.
     pub display: DisplayReadiness,
@@ -109,6 +118,11 @@ impl Readiness {
         self.lxc_installed
             && self.binder.is_ready()
             && self.image.as_ref().map(|i| i.is_present()).unwrap_or(false)
+            && self
+                .vendor
+                .as_ref()
+                .map(|i| i.is_present())
+                .unwrap_or(false)
     }
 
     /// Is there somewhere for an app's window to go?
@@ -187,13 +201,16 @@ impl Oven {
             .with_context(|| format!("cannot write {}", self.dirs.state_file.display()))
     }
 
-    /// Register a system image.
-    pub fn add_image(&self, path: &Path) -> Result<Image> {
-        let image = image::register(path)?;
+    /// Register the system image, and the vendor image alongside it.
+    pub fn add_images(&self, path: &Path, vendor: Option<&Path>) -> Result<image::ImageSet> {
+        let set = image::register_set(path, vendor)?;
         let mut record = self.record()?;
-        record.image = Some(image.clone());
+        record.system = Some(set.system.clone());
+        // Naming a system image on its own replaces the pair rather than
+        // leaving a vendor image from some other build behind it.
+        record.vendor = set.vendor.clone();
         self.write_record(&record)?;
-        Ok(image)
+        Ok(set)
     }
 
     /// Set a property that overrides what Cookie computes.
@@ -213,14 +230,19 @@ impl Oven {
         Ok(had)
     }
 
-    /// Forget the registered image.
+    /// Forget the registered images.
     pub fn remove_image(&self) -> Result<bool> {
         let mut record = self.record()?;
-        let had = record.image.take().is_some();
+        let had = record.system.take().is_some() || record.vendor.take().is_some();
         if had {
             self.write_record(&record)?;
         }
         Ok(had)
+    }
+
+    /// How the container root is layered.
+    pub fn layers(&self) -> mount::Layers {
+        mount::Layers::under(&self.dirs.root)
     }
 
     /// Where everything stands.
@@ -228,7 +250,8 @@ impl Oven {
         Readiness {
             lxc_installed: cmd::which("lxc-start").is_some(),
             binder: binder::state(),
-            image: self.record().ok().and_then(|r| r.image),
+            image: self.record().ok().and_then(|r| r.system),
+            vendor: self.record().ok().and_then(|r| r.vendor),
             display: display::readiness(&system::render_nodes()),
         }
     }
@@ -257,9 +280,18 @@ impl Oven {
         Ok(props)
     }
 
-    /// Where the property file lands, both on the host and in the container.
+    /// Where the property file lives on the host.
     pub fn props_path(&self) -> PathBuf {
-        self.dirs.data.join("cookie.prop")
+        self.dirs.root.join("cookie.prop")
+    }
+
+    /// Where it is bound inside the container root.
+    ///
+    /// `/vendor/waydroid.prop` is where a Waydroid-derived image looks, and
+    /// those are the images that exist. A file at any other path is a file
+    /// nothing reads.
+    pub fn container_props_path(&self) -> PathBuf {
+        self.layers().rootfs.join("vendor/waydroid.prop")
     }
 
     /// Write the property file into the shared data directory, which the
@@ -322,6 +354,8 @@ impl Oven {
             render_nodes: system::render_nodes(),
             wayland_socket,
             pulse_socket: pulse_socket(),
+            cgroup_v2: container::host_uses_cgroup_v2(),
+            host_egl_dirs: container::host_egl_dirs(),
             uid: current_uid(),
             gid: current_gid(),
         })
@@ -337,53 +371,6 @@ impl Oven {
         fs::write(&self.dirs.config, config.render())
             .with_context(|| format!("cannot write {}", self.dirs.config.display()))?;
         Ok(self.dirs.config.clone())
-    }
-
-    /// Mount the system image read-only at the container's root.
-    fn mount_image(&self, image: &Image) -> Result<()> {
-        if is_mount_point(&self.dirs.rootfs) {
-            return Ok(());
-        }
-        paths::ensure_dir(&self.dirs.rootfs)?;
-
-        let source = image.path.display().to_string();
-        let target = self.dirs.rootfs.display().to_string();
-        let arguments = [
-            "mount".to_string(),
-            "-o".to_string(),
-            "loop,ro".to_string(),
-            "-t".to_string(),
-            image.format.mount_type().to_string(),
-            source,
-            target,
-        ];
-        let arguments: Vec<String> = arguments.to_vec();
-
-        let as_root = binder::running_as_root();
-        if !as_root {
-            crate::ui::step(
-                "mounting the Android system image — this needs root, because mounting a \
-                 filesystem does",
-            );
-            crate::ui::note(&crate::ui::dim(&format!("  sudo {}", arguments.join(" "))));
-        }
-
-        let (program, args): (&str, Vec<&str>) = if as_root {
-            ("mount", arguments[1..].iter().map(String::as_str).collect())
-        } else {
-            ("sudo", arguments.iter().map(String::as_str).collect())
-        };
-
-        let out = cmd::run(program, &args)?;
-        if !out.ok() {
-            bail!(
-                "could not mount the system image:\n{}\n\n\
-                 Run it yourself to see more:\n  sudo {}",
-                cmd::indent(&out.message()),
-                arguments.join(" ")
-            );
-        }
-        Ok(())
     }
 
     /// Run a command inside the container.
@@ -426,6 +413,19 @@ impl AndroidBackend for Oven {
                 // Mountable or loadable: `start` deals with it.
             }
             _ => {}
+        }
+
+        if readiness.image.is_some() && readiness.vendor.is_none() {
+            bail!(
+                "a system image is registered, but no vendor image is.\n\
+                 Android's hardware layers live in /vendor — the graphics ones included — so it \
+                 cannot boot without one.\n\
+                 \n\
+                 Register them together:\n  \
+                 cookie oven image add <system.img> <vendor.img>\n\
+                 or point Cookie at the directory holding both:\n  \
+                 cookie oven image add <directory>"
+            );
         }
 
         match &readiness.image {
@@ -498,7 +498,7 @@ impl AndroidBackend for Oven {
         self.ensure_available()?;
 
         let record = self.record()?;
-        let Some(image) = record.image else {
+        let Some(system) = record.system else {
             bail!("no system image is registered");
         };
 
@@ -506,15 +506,22 @@ impl AndroidBackend for Oven {
         crate::ui::step("checking binder support");
         binder::ensure_mounted(Path::new(binder::DEFAULT_MOUNT_POINT))?;
 
-        crate::ui::step("mounting the system image");
-        self.mount_image(&image)?;
+        // The root is layered: the images read-only, a writable overlay over
+        // each. The container creates device nodes and mount points inside
+        // it, so a bare read-only image is not enough.
+        crate::ui::step("assembling the container root");
+        let layers = self.layers();
+        mount::assemble(&layers, &system, record.vendor.as_ref())?;
 
         crate::ui::step("writing the container configuration");
         let config = self.write_container_config()?;
 
         // Android decides how to draw from these, and only the host knows
-        // what hardware is here, so they have to be written before it boots.
+        // what hardware is here, so they go in before it boots — bound to
+        // the path the image reads, since a file it does not read is a file
+        // that may as well not exist.
         let props_path = self.write_properties()?;
+        mount::bind_file(&props_path, &self.container_props_path())?;
         let display = self.display_config();
         crate::ui::note(&crate::ui::dim(&format!(
             "graphics: {} ({})",
@@ -561,6 +568,13 @@ impl AndroidBackend for Oven {
                 cmd::indent(&out.message())
             );
         }
+
+        // Leaving the images and overlays mounted would keep a loop device
+        // busy and quietly pin the image file.
+        for problem in mount::disassemble(&self.layers()) {
+            crate::ui::warn(&format!("could not unmount {problem}"));
+        }
+
         Ok(())
     }
 
@@ -1005,19 +1019,19 @@ mod tests {
         let path = scratch.path().join("system.img");
         fs::write(&path, &data).expect("write");
 
-        let registered = oven.add_image(&path).expect("add");
-        assert_eq!(registered.format, image::ImageFormat::Ext4);
+        let registered = oven.add_images(&path, None).expect("add");
+        assert_eq!(registered.system.format, image::ImageFormat::Ext4);
 
         // A fresh handle on the same directory sees it.
         let reopened = Oven::with_dirs(OvenDirs::under(&scratch.path().join("oven")));
         let record = reopened.record().expect("record");
         assert_eq!(
-            record.image.as_ref().map(|i| i.path.clone()),
-            Some(registered.path)
+            record.system.as_ref().map(|i| i.path.clone()),
+            Some(registered.system.path)
         );
 
         assert!(reopened.remove_image().expect("remove"));
-        assert!(reopened.record().expect("record").image.is_none());
+        assert!(reopened.record().expect("record").system.is_none());
         assert!(!reopened.remove_image().expect("remove again"));
     }
 

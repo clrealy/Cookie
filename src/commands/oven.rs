@@ -119,14 +119,32 @@ fn image(args: &OvenImageArgs) -> Result<i32> {
     match args.action.as_ref().unwrap_or(&OvenImageAction::Show) {
         OvenImageAction::Add(add) => {
             ui::step(&format!("checking {}", add.path.display()));
-            let image = oven.add_image(&add.path)?;
-            ui::success("Registered the system image.");
+            let set = oven.add_images(&add.path, add.vendor.as_deref())?;
+            ui::success("Registered the images.");
             ui::note(&format!(
-                "path    {}\nformat  {}\nsize    {}",
-                paths::tilde(&image.path),
-                image.format.label(),
-                ui::bytes(image.size)
+                "system  {}  ({}, {})",
+                paths::tilde(&set.system.path),
+                set.system.format.label(),
+                ui::bytes(set.system.size)
             ));
+            match &set.vendor {
+                Some(vendor) => ui::note(&format!(
+                    "vendor  {}  ({}, {})",
+                    paths::tilde(&vendor.path),
+                    vendor.format.label(),
+                    ui::bytes(vendor.size)
+                )),
+                None => {
+                    println!();
+                    ui::warn(
+                        "no vendor image was registered, and the oven cannot start without \
+                         one.\nAndroid's hardware layers live in /vendor — the graphics ones \
+                         included.\nRegister it with:\n  cookie oven image add <system.img> \
+                         <vendor.img>",
+                    );
+                    return Ok(1);
+                }
+            }
             println!();
             println!(
                 "  Light the oven with:  {}",
@@ -147,7 +165,19 @@ fn image(args: &OvenImageArgs) -> Result<i32> {
 
         OvenImageAction::Show => {
             let record = oven.record()?;
-            match record.image {
+            if let Some(vendor) = &record.vendor {
+                ui::heading("Vendor image");
+                ui::status_line(
+                    if vendor.is_present() {
+                        Level::Ok
+                    } else {
+                        Level::Fail
+                    },
+                    "path",
+                    &paths::tilde(&vendor.path),
+                );
+            }
+            match record.system {
                 Some(image) if image.is_present() => {
                     ui::heading("System image");
                     ui::status_line(Level::Ok, "path", &paths::tilde(&image.path));

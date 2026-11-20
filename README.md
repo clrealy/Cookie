@@ -20,16 +20,19 @@ One app, one ordinary desktop window. No Android home screen in the way.
 > it, installed apps appear in your application menu, updates keep your data,
 > and `cookie burnt` will tell you honestly what your machine is missing.
 >
-> **Cookie's own runtime — the oven — is written, and known not to boot
-> yet.** Comparing it against Waydroid's own implementation turned up three
-> things it is missing: it mounts one image where two are needed, it mounts
-> that image read-only where a writable overlay is needed, and it writes
-> Android's properties where nothing reads them. Each one stops the container
-> coming up. They are itemised in **[docs/oven.md](docs/oven.md)**.
+> **Cookie's own runtime — the oven — has had its three known blockers
+> fixed, and has still never been booted.** Comparing it against Waydroid's
+> own implementation had turned up three things that each stopped the
+> container coming up: it mounted one image where two are needed, mounted it
+> read-only where a writable overlay is needed, and wrote Android's
+> properties where nothing reads them. All three are fixed, and the fix is
+> verified by a test that does real loop and overlay mounts.
+>
+> That is not the same as working. It has never run against a kernel with
+> binder, two images, LXC and a Wayland session at once, and
+> **[docs/oven.md](docs/oven.md)** lists what is still unknown.
 >
 > Waydroid is the default backend and the one that runs apps.
->
-> Treat the oven as unfinished, and the rest as young.
 >
 > Expect rough edges. Expect the `.cpk` format to gain fields. Do not put
 > anything you care about in here yet.
@@ -404,8 +407,9 @@ not.
 | binderfs — detect, mount, **create its devices** | ✅ |
 | Container configuration and lifecycle | ✅ |
 | Install, remove, list, launch and log apps | ✅ |
-| **The display path** | 🟡 computed correctly, cannot take effect yet |
-| Container actually boots | ❌ **no — three known blockers** |
+| The container root — two images, writable overlay | ✅ verified by real mounts |
+| **The display path** | ✅ host side |
+| Container actually boots | ❓ **never tried** |
 
 ### Where the Wayland client actually lives
 
@@ -448,8 +452,12 @@ what Cookie asks of LXC.
 your call. Hand it one and Cookie checks it:
 
 ```sh
-cookie oven image add /path/to/system.img
+cookie oven image add ~/waydroid-images       # a directory holding both images
+cookie oven image add system.img vendor.img   # or name them
 ```
+
+Both are needed: Android's hardware layers live in `/vendor`, the graphics
+ones included.
 
 Most downloads are Android *sparse* images, which cannot be mounted directly —
 Cookie recognises them and tells you the `simg2img` command rather than
@@ -525,11 +533,11 @@ The full specification is in **[docs/cpk-spec.md](docs/cpk-spec.md)**.
 | **1** | `bake`, `eat`, `jar`, `crumbs`, `burnt`, `oven`, `toss` on a Waydroid backend | ✅ done |
 | **2** | `application/x-cookie-package` MIME type, `.desktop` launchers with icons, double-click to run | ✅ done |
 | **3** | In-place updates that keep app data when signatures match, and warn loudly when they do not | ✅ done |
-| **4** | **The oven**: Cookie's own runtime — container setup, binderfs mounting, one shared Android image — replacing Waydroid | 🟡 written, does not boot |
+| **4** | **The oven**: Cookie's own runtime — container setup, binderfs mounting, one shared Android image — replacing Waydroid | 🟡 built, never booted |
 
-The oven needs a vendor image, a writable overlay, and its properties bound
-to the path the image reads. Those are specified in
-[docs/oven.md](docs/oven.md) — it needs that code, then hardware.
+Every known blocker is fixed. What is left is to run it on a machine with
+binder, two images and a Wayland session, which needs hardware rather than
+more code. [docs/oven.md](docs/oven.md) says what is still unknown.
 
 The backend sits behind a trait (`AndroidBackend`), so the oven is a second
 implementation rather than a rewrite — both are selectable today with
@@ -540,7 +548,7 @@ implementation rather than a rewrite — both are selectable today with
 ## Development
 
 ```sh
-cargo test                              # 314 tests
+cargo test                              # 332 tests
 cargo clippy --all-targets              # clean
 cargo fmt --check                       # clean
 python3 tests/fixtures/make_fixtures.py # regenerate the test APKs

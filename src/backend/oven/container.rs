@@ -18,7 +18,7 @@
 //! here is the whole of what Cookie asks of it.
 
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +47,15 @@ pub struct ContainerConfig {
     /// The desktop's PulseAudio or PipeWire socket, so apps can make a noise.
     #[serde(default)]
     pub pulse_socket: Option<PathBuf>,
+    /// Whether this host uses the unified cgroup hierarchy. The device
+    /// allowlist is spelled differently on each, and writing the wrong one
+    /// means no allowlist at all.
+    #[serde(default)]
+    pub cgroup_v2: bool,
+    /// Host EGL directories to expose, for a host that carries its own
+    /// Android graphics libraries.
+    #[serde(default)]
+    pub host_egl_dirs: Vec<PathBuf>,
     /// Uid and gid the session belongs to.
     pub uid: u32,
     pub gid: u32,
@@ -75,15 +84,21 @@ impl ContainerConfig {
         // Android's own init is the container's first process.
         let _ = writeln!(out, "lxc.init.cmd = /init");
         let _ = writeln!(out, "lxc.arch = {}", host_lxc_arch());
+        let _ = writeln!(out, "lxc.console.path = none");
         out.push('\n');
 
         let _ = writeln!(out, "# Namespaces");
-        // No user namespace: Android's init expects real uids, and binder
-        // ties handles to them. The container is confined by the device
-        // allowlist below rather than by uid remapping.
         // Sharing the network namespace keeps apps on the host's network,
         // which is what someone running a single app expects.
         let _ = writeln!(out, "lxc.namespace.keep = net");
+        out.push('\n');
+
+        // Android's init does a great deal that an ordinary container
+        // process does not: it mounts filesystems, makes device nodes, sets
+        // the clock and manages cgroups. LXC's default capability set drops
+        // most of that, so the set it needs is named explicitly.
+        let _ = writeln!(out, "# What Android's init needs to be allowed to do");
+        let _ = writeln!(out, "lxc.cap.keep = {}", ANDROID_CAPABILITIES.join(" "));
         out.push('\n');
 
         let _ = writeln!(
@@ -92,13 +107,36 @@ impl ContainerConfig {
         );
         let _ = writeln!(out, "lxc.apparmor.profile = unconfined");
         let _ = writeln!(out, "lxc.seccomp.profile =");
+        out.push('\n');
+
+        let _ = writeln!(out, "# Kernel filesystems");
+        let _ = writeln!(out, "lxc.mount.auto = cgroup:ro sys:ro proc");
+        // LXC's own /dev population is off because Android's ueventd does it;
+        // the tmpfs below is what gives it somewhere to do it.
         let _ = writeln!(out, "lxc.autodev = 0");
+        let _ = writeln!(
+            out,
+            "lxc.mount.entry = tmpfs dev tmpfs create=dir,mode=0755 0 0"
+        );
         out.push('\n');
 
         let _ = writeln!(out, "# Devices: nothing is exposed that is not listed here");
-        let _ = writeln!(out, "lxc.cgroup2.devices.deny = a");
+        let prefix = if self.cgroup_v2 {
+            "lxc.cgroup2"
+        } else {
+            "lxc.cgroup"
+        };
+        let _ = writeln!(out, "{prefix}.devices.deny = a");
         for device in STANDARD_DEVICES {
-            let _ = writeln!(out, "lxc.cgroup2.devices.allow = {device}");
+            let _ = writeln!(out, "{prefix}.devices.allow = {device}");
+        }
+        // With autodev off and a fresh tmpfs, these have to come from the
+        // host or they are simply absent.
+        for node in BASIC_DEV_NODES {
+            let _ = writeln!(
+                out,
+                "lxc.mount.entry = /dev/{node} dev/{node} none bind,optional,create=file 0 0"
+            );
         }
         out.push('\n');
 
@@ -124,6 +162,19 @@ impl ContainerConfig {
                     out,
                     "lxc.mount.entry = {} dev/dri/{name} none bind,optional,create=file 0 0",
                     node.display()
+                );
+            }
+            out.push('\n');
+        }
+
+        if !self.host_egl_dirs.is_empty() {
+            let _ = writeln!(out, "# The host's own Android graphics libraries");
+            for dir in &self.host_egl_dirs {
+                let _ = writeln!(
+                    out,
+                    "lxc.mount.entry = {} {} none bind,optional,create=dir 0 0",
+                    dir.display(),
+                    dir.display().to_string().trim_start_matches('/')
                 );
             }
             out.push('\n');
@@ -201,6 +252,59 @@ impl ContainerConfig {
     }
 }
 
+/// What Android's init needs to be allowed to do.
+///
+/// `lxc.cap.keep` is an allowlist: everything not named here is dropped.
+/// The set mirrors the one Waydroid's own container config keeps, because
+/// these are what Android's init, ueventd and the HALs actually use.
+const ANDROID_CAPABILITIES: &[&str] = &[
+    "audit_control",
+    "block_suspend",
+    "chown",
+    "dac_override",
+    "dac_read_search",
+    "fowner",
+    "fsetid",
+    "ipc_lock",
+    "kill",
+    "mknod",
+    "net_admin",
+    "net_bind_service",
+    "net_raw",
+    "setgid",
+    "setpcap",
+    "setuid",
+    "sys_admin",
+    "sys_chroot",
+    "sys_nice",
+    "sys_ptrace",
+    "sys_resource",
+    "sys_time",
+    "syslog",
+    "wake_alarm",
+];
+
+/// Device nodes that have to be bound in from the host, because `lxc.autodev`
+/// is off and the `/dev` tmpfs starts empty.
+const BASIC_DEV_NODES: &[&str] = &["null", "zero", "full", "random", "urandom", "tty", "ptmx"];
+
+/// Does this host use the unified cgroup hierarchy?
+pub fn host_uses_cgroup_v2() -> bool {
+    // The unified hierarchy puts this file at the root; cgroup v1 has no
+    // such file.
+    Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
+}
+
+/// Host directories carrying Android EGL libraries, if this is that sort of
+/// host.
+pub fn host_egl_dirs() -> Vec<PathBuf> {
+    ["/vendor/lib/egl", "/vendor/lib64/egl"]
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
 /// Devices every Android container needs, in cgroup device-allowlist syntax.
 const STANDARD_DEVICES: &[&str] = &[
     "c 1:3 rwm",   // /dev/null
@@ -243,6 +347,8 @@ mod tests {
             render_nodes: vec![PathBuf::from("/dev/dri/renderD128")],
             wayland_socket: Some(PathBuf::from("/run/user/1000/wayland-0")),
             pulse_socket: Some(PathBuf::from("/run/user/1000/pulse/native")),
+            cgroup_v2: true,
+            host_egl_dirs: Vec::new(),
             uid: 1000,
             gid: 1000,
         }
@@ -388,6 +494,80 @@ mod tests {
     #[test]
     fn rendering_is_deterministic() {
         assert_eq!(config().render(), config().render());
+    }
+
+    #[test]
+    fn androids_init_keeps_the_capabilities_it_needs() {
+        let rendered = config().render();
+        // lxc.cap.keep is an allowlist: anything not named is dropped, and
+        // Android's init mounts filesystems, makes nodes and sets the clock.
+        assert!(rendered.contains("lxc.cap.keep = "), "{rendered}");
+        for capability in ["sys_admin", "mknod", "sys_time", "net_admin", "sys_ptrace"] {
+            assert!(
+                rendered.contains(capability),
+                "{capability} missing from:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_kernel_filesystems_are_mounted() {
+        assert!(config()
+            .render()
+            .contains("lxc.mount.auto = cgroup:ro sys:ro proc"));
+    }
+
+    /// With autodev off, a tmpfs has to exist on /dev before anything can be
+    /// bound into it — this is what a read-only root used to make impossible.
+    #[test]
+    fn dev_is_a_tmpfs_before_anything_is_bound_into_it() {
+        let rendered = config().render();
+        let tmpfs = rendered
+            .find("lxc.mount.entry = tmpfs dev tmpfs")
+            .expect("a tmpfs on /dev");
+        let binder = rendered.find("dev/binder none bind").expect("binder");
+        let null = rendered.find("/dev/null dev/null").expect("null");
+        assert!(tmpfs < binder, "the tmpfs must come first:\n{rendered}");
+        assert!(tmpfs < null, "the tmpfs must come first:\n{rendered}");
+    }
+
+    #[test]
+    fn the_basic_device_nodes_come_from_the_host() {
+        let rendered = config().render();
+        for node in ["null", "zero", "urandom", "ptmx"] {
+            assert!(
+                rendered.contains(&format!("/dev/{node} dev/{node} none bind")),
+                "{node} missing from:\n{rendered}"
+            );
+        }
+    }
+
+    /// The allowlist key differs between cgroup hierarchies, and writing the
+    /// wrong one means no allowlist at all rather than an error.
+    #[test]
+    fn the_device_allowlist_matches_the_hosts_cgroup_version() {
+        let mut config = config();
+
+        config.cgroup_v2 = true;
+        let v2 = config.render();
+        assert!(v2.contains("lxc.cgroup2.devices.deny = a"), "{v2}");
+        assert!(!v2.contains("lxc.cgroup.devices"), "{v2}");
+
+        config.cgroup_v2 = false;
+        let v1 = config.render();
+        assert!(v1.contains("lxc.cgroup.devices.deny = a"), "{v1}");
+        assert!(!v1.contains("lxc.cgroup2.devices"), "{v1}");
+    }
+
+    #[test]
+    fn host_egl_directories_are_passed_through_when_there_are_any() {
+        let mut config = config();
+        assert!(!config.render().contains("vendor/lib64/egl"));
+
+        config.host_egl_dirs = vec![PathBuf::from("/vendor/lib64/egl")];
+        assert!(config
+            .render()
+            .contains("/vendor/lib64/egl vendor/lib64/egl none bind"));
     }
 
     #[test]

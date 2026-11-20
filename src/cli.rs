@@ -270,9 +270,13 @@ pub enum OvenImageAction {
 
 #[derive(Debug, Args)]
 pub struct OvenImageAddArgs {
-    /// Path to the image, usually system.img
-    #[arg(value_name = "FILE")]
+    /// The system image, or a directory holding both images
+    #[arg(value_name = "SYSTEM_OR_DIR")]
     pub path: PathBuf,
+
+    /// The vendor image. Android cannot boot without one.
+    #[arg(value_name = "VENDOR")]
+    pub vendor: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
