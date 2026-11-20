@@ -14,17 +14,19 @@ One app, one ordinary desktop window. No Android home screen in the way.
 
 > ## ⚠️ Work in progress — nothing here is finished
 >
-> Cookie is at **milestone 4 of 4**, and milestone 4 is only *started*.
+> Cookie is at **milestone 4 of 4**, and all four are built.
 >
-> Running apps today still goes through [Waydroid](https://waydro.id/). The
-> commands work, the `.cpk` format is real, double-clicking a cookie runs it,
-> installed apps appear in your application menu, updates keep your data, and
-> `cookie burnt` will tell you honestly what your machine is missing.
+> The commands work, the `.cpk` format is real, double-clicking a cookie runs
+> it, installed apps appear in your application menu, updates keep your data,
+> and `cookie burnt` will tell you honestly what your machine is missing.
 >
-> **Cookie's own runtime — the oven — can prepare and boot an Android
-> container, but it cannot show an app's window yet.** That needs a display
-> bridge, which is the largest single piece Waydroid provides and the next
-> thing to build. See **[docs/oven.md](docs/oven.md)**.
+> **Cookie's own runtime — the oven — is complete on the host side** and
+> selectable with `--backend oven`. Waydroid is still the default, because
+> the oven has never been booted against real hardware: no part of this has
+> run against a kernel with binder, an Android image and a Wayland session at
+> the same time. Everything is written and tested; none of it is proven.
+>
+> Treat the oven as untested, and the rest as young.
 >
 > Expect rough edges. Expect the `.cpk` format to gain fields. Do not put
 > anything you care about in here yet.
@@ -325,12 +327,13 @@ These also drive **Cookie's own runtime**, which is being built behind
 ```sh
 cookie oven image add system.img       # register a system image
 cookie oven image                      # show what is registered
+cookie oven prop                       # the Android properties it will set
 cookie oven recipe                     # print the container configuration
 cookie oven status --backend oven      # how the oven is doing
 cookie burnt  --backend oven           # the full check, oven included
 ```
 
-It cannot run apps yet — see below.
+Complete on the host side, and never booted on real hardware — see below.
 
 ### `cookie toss` — uninstall
 
@@ -390,31 +393,44 @@ not.
 
 ---
 
-## Cookie's own runtime, so far
-
-Milestone 4 is **started, not finished**. What the oven does today:
+## Cookie's own runtime
 
 | Piece | State |
 |---|---|
 | Shared system image — register, check, mount | ✅ |
-| binderfs — detect, mount, expose devices | ✅ |
+| binderfs — detect, mount, **create its devices** | ✅ |
 | Container configuration and lifecycle | ✅ |
-| Install, remove and list apps | ✅ |
-| **App windows on your desktop** | ❌ **not built** |
+| Install, remove, list, launch and log apps | ✅ |
+| **The display path** | ✅ host side |
+| Booted against real hardware | ❌ **never** |
 
-An Android app does not draw to a window — it hands buffers to SurfaceFlinger,
-which composites them through a hardware composer that expects to end at a
-display. Getting those surfaces into Wayland windows means writing a
-hardware-composer implementation that is itself a Wayland client. That is the
-largest single thing Waydroid provides, and Cookie does not have its own yet.
+### Where the Wayland client actually lives
 
-So the oven says so rather than appearing to work:
+Not in Cookie — and getting this wrong is what made milestone 4 look far
+bigger than it was.
+
+An Android app draws through SurfaceFlinger, which composites through a
+hardware composer. In this design **that composer is inside the system
+image**, and it is the Wayland client: it connects *out* to a socket the host
+mounts in. There is no host-side compositor or proxy anywhere in the picture —
+Waydroid has none either.
+
+So the host's job is finite: put the desktop's Wayland socket where the
+in-image HAL looks for it (`/run/xdg/wayland-0`), pass the GPU and
+`/dev/sw_sync` through, work out which graphics implementation to tell it to
+load, and ask for one window per app. All four are done.
+
+What the host **cannot** determine is whether a given image carries such a
+composer at all. A LineageOS build made for Waydroid does; a stock Android
+image does not, and with one of those the container boots and apps install
+but nothing is drawn. Cookie says so instead of guessing:
 
 ```
 $ cookie burnt --backend oven
   ✔ system image  ~/android/system.img (ext4, 2.1 GiB)
   ✔ container engine  lxc is installed
-  ✘ display bridge  not built yet, so the oven cannot show an app's window
+  ✔ display  mesa on /dev/dri/renderD128, one window per app
+  · image graphics  cannot be checked without booting the image
 ```
 
 **The oven replaces Waydroid, not LXC.** Waydroid is a whole session manager —
@@ -435,6 +451,14 @@ cookie oven image add /path/to/system.img
 Most downloads are Android *sparse* images, which cannot be mounted directly —
 Cookie recognises them and tells you the `simg2img` command rather than
 failing obscurely.
+
+Android decides how to draw from properties, and only the host knows what
+hardware is here, so Cookie works them out and lets you override any of them:
+
+```sh
+cookie oven prop                            # what it worked out, and from what
+cookie oven prop set ro.sf.lcd_density 240  # yours wins
+```
 
 The full picture, including why the display bridge is hard and what comes
 next, is in **[docs/oven.md](docs/oven.md)**.
@@ -498,10 +522,11 @@ The full specification is in **[docs/cpk-spec.md](docs/cpk-spec.md)**.
 | **1** | `bake`, `eat`, `jar`, `crumbs`, `burnt`, `oven`, `toss` on a Waydroid backend | ✅ done |
 | **2** | `application/x-cookie-package` MIME type, `.desktop` launchers with icons, double-click to run | ✅ done |
 | **3** | In-place updates that keep app data when signatures match, and warn loudly when they do not | ✅ done |
-| **4** | **The oven**: Cookie's own runtime — container setup, binderfs mounting, one shared Android image — replacing Waydroid | 🟡 started |
+| **4** | **The oven**: Cookie's own runtime — container setup, binderfs mounting, one shared Android image — replacing Waydroid | ✅ host side |
 
-Milestone 4's remaining work, in order: the display bridge, binder device
-allocation, and Android properties. See [docs/oven.md](docs/oven.md).
+The oven is built and unproven. What is left is to boot it on a machine that
+has binder, an image and a Wayland session — which needs hardware, not more
+code. See [docs/oven.md](docs/oven.md).
 
 The backend sits behind a trait (`AndroidBackend`), so the oven is a second
 implementation rather than a rewrite — both are selectable today with
@@ -512,7 +537,7 @@ implementation rather than a rewrite — both are selectable today with
 ## Development
 
 ```sh
-cargo test                              # 277 tests
+cargo test                              # 314 tests
 cargo clippy --all-targets              # clean
 cargo fmt --check                       # clean
 python3 tests/fixtures/make_fixtures.py # regenerate the test APKs
@@ -547,9 +572,12 @@ rather than verifying the signature.
   bounds-checked, and a malformed file produces an error, never a panic.
 - "Cannot tell" is never silently treated as "fine". An unreadable signature
   warns; it does not pass.
-- Unfinished work says it is unfinished. The oven cannot show a window, so it
-  reports that in `burnt` and refuses `launch` with an explanation, rather
-  than failing in a way that looks like a bug.
+- Unfinished work says it is unfinished, and untested work says it is
+  untested. The oven has never been booted, and `burnt` reports the one thing
+  the host cannot check rather than implying it did.
+- There is exactly one `unsafe` block, for the `BINDER_CTL_ADD` ioctl. It is
+  confined to one function, and the struct layout and ioctl number are
+  asserted against the kernel ABI in tests.
 - Never assume systemd.
 - `sudo` only when it is genuinely required, and always with the reason.
 - Cookie reads files the user gives it. It downloads nothing.

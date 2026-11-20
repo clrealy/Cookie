@@ -195,6 +195,13 @@ pub enum OvenAction {
     Stop,
     /// Say whether it is running
     Status,
+    /// Show or change the Android properties the oven sets
+    #[command(
+        long_about = "The Android properties the oven hands to the system image.\n\n\
+                            Cookie works out the graphics ones from your hardware, because only \
+                            the host knows what is here. Anything you set overrides that."
+    )]
+    Prop(OvenPropArgs),
     /// Print the container configuration Cookie would use
     #[command(
         long_about = "Print the container configuration the oven generates.\n\n\
@@ -210,6 +217,39 @@ pub enum OvenAction {
                             call, not Cookie's, so you supply the file and Cookie checks that \
                             it is usable.")]
     Image(OvenImageArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct OvenPropArgs {
+    #[command(subcommand)]
+    pub action: Option<OvenPropAction>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum OvenPropAction {
+    /// Override a property
+    Set(OvenPropSetArgs),
+    /// Drop an override, going back to Cookie's own answer
+    Unset(OvenPropUnsetArgs),
+    /// Show every property the oven would set
+    List,
+}
+
+#[derive(Debug, Args)]
+pub struct OvenPropSetArgs {
+    /// Property name, e.g. ro.sf.lcd_density
+    #[arg(value_name = "NAME")]
+    pub key: String,
+    /// What to set it to
+    #[arg(value_name = "VALUE")]
+    pub value: String,
+}
+
+#[derive(Debug, Args)]
+pub struct OvenPropUnsetArgs {
+    /// Property name
+    #[arg(value_name = "NAME")]
+    pub key: String,
 }
 
 #[derive(Debug, Args)]

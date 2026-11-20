@@ -22,6 +22,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use super::display::{CONTAINER_RUNTIME_DIR, CONTAINER_WAYLAND_DISPLAY};
+
 /// Name of the container Cookie manages.
 pub const CONTAINER_NAME: &str = "cookie";
 
@@ -38,8 +40,13 @@ pub struct ContainerConfig {
     pub binder_devices: Vec<String>,
     /// GPU render nodes to pass through, if any.
     pub render_nodes: Vec<PathBuf>,
-    /// The user's Wayland socket, so Android can eventually draw to it.
+    /// The desktop's Wayland socket. The Android side's hardware composer
+    /// connects to this from inside the container; it is how an app's window
+    /// reaches the screen.
     pub wayland_socket: Option<PathBuf>,
+    /// The desktop's PulseAudio or PipeWire socket, so apps can make a noise.
+    #[serde(default)]
+    pub pulse_socket: Option<PathBuf>,
     /// Uid and gid the session belongs to.
     pub uid: u32,
     pub gid: u32,
@@ -131,12 +138,57 @@ impl ContainerConfig {
         let _ = writeln!(out, "lxc.mount.entry = tmpfs dev/shm tmpfs defaults 0 0");
         out.push('\n');
 
+        // This is the display bridge, such as it is on the host side. The
+        // Wayland client is the hardware composer *inside* the image, so all
+        // the host has to do is put the socket where that HAL looks for it.
+        // The path is not arbitrary: it is the one a Waydroid-derived image
+        // expects, so such an image works unmodified.
         if let Some(socket) = &self.wayland_socket {
-            let _ = writeln!(out, "# The desktop's Wayland socket");
             let _ = writeln!(
                 out,
-                "lxc.mount.entry = {} mnt/wayland none bind,optional,create=file 0 0",
-                socket.display()
+                "# Display: the desktop's Wayland socket, where Android looks for it"
+            );
+            // A tmpfs first, or there is nothing to mount the socket onto.
+            let _ = writeln!(
+                out,
+                "lxc.mount.entry = tmpfs {} tmpfs create=dir,mode=0755 0 0",
+                CONTAINER_RUNTIME_DIR.trim_start_matches('/')
+            );
+            let _ = writeln!(
+                out,
+                "lxc.mount.entry = {} {}/{} none rbind,create=file 0 0",
+                socket.display(),
+                CONTAINER_RUNTIME_DIR.trim_start_matches('/'),
+                CONTAINER_WAYLAND_DISPLAY
+            );
+            // The HAL finds the socket through these, exactly as any other
+            // Wayland client would.
+            let _ = writeln!(
+                out,
+                "lxc.environment = XDG_RUNTIME_DIR={CONTAINER_RUNTIME_DIR}"
+            );
+            let _ = writeln!(
+                out,
+                "lxc.environment = WAYLAND_DISPLAY={CONTAINER_WAYLAND_DISPLAY}"
+            );
+            out.push('\n');
+        }
+
+        // The hardware composer needs this to fence its buffers.
+        let _ = writeln!(out, "# Fencing, for the hardware composer");
+        let _ = writeln!(
+            out,
+            "lxc.mount.entry = /dev/sw_sync dev/sw_sync none bind,optional,create=file 0 0"
+        );
+        out.push('\n');
+
+        if let Some(socket) = &self.pulse_socket {
+            let _ = writeln!(out, "# Sound");
+            let _ = writeln!(
+                out,
+                "lxc.mount.entry = {} {}/pulse/native none bind,optional,create=file 0 0",
+                socket.display(),
+                CONTAINER_RUNTIME_DIR.trim_start_matches('/')
             );
             out.push('\n');
         }
@@ -190,6 +242,7 @@ mod tests {
             ],
             render_nodes: vec![PathBuf::from("/dev/dri/renderD128")],
             wayland_socket: Some(PathBuf::from("/run/user/1000/wayland-0")),
+            pulse_socket: Some(PathBuf::from("/run/user/1000/pulse/native")),
             uid: 1000,
             gid: 1000,
         }
@@ -265,7 +318,51 @@ mod tests {
         let mut config = config();
         config.wayland_socket = None;
         let rendered = config.render();
-        assert!(!rendered.contains("mnt/wayland"), "{rendered}");
+        assert!(!rendered.contains("wayland-0"), "{rendered}");
+        assert!(!rendered.contains("WAYLAND_DISPLAY"), "{rendered}");
+    }
+
+    /// The display path, such as it is on the host: put the desktop's socket
+    /// where the image's hardware composer looks for it.
+    #[test]
+    fn the_wayland_socket_lands_where_the_image_expects_it() {
+        let rendered = config().render();
+        assert!(
+            rendered.contains("/run/user/1000/wayland-0 run/xdg/wayland-0 none rbind"),
+            "{rendered}"
+        );
+        // And a tmpfs has to exist first or there is nothing to mount onto.
+        let tmpfs = rendered
+            .find("tmpfs run/xdg")
+            .expect("a tmpfs for /run/xdg");
+        let socket = rendered.find("run/xdg/wayland-0 none").expect("the socket");
+        assert!(tmpfs < socket, "the tmpfs must come first:\n{rendered}");
+    }
+
+    #[test]
+    fn the_composer_can_find_the_socket_through_the_usual_variables() {
+        let rendered = config().render();
+        assert!(
+            rendered.contains("lxc.environment = XDG_RUNTIME_DIR=/run/xdg"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("lxc.environment = WAYLAND_DISPLAY=wayland-0"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn the_fence_device_is_passed_through_for_the_composer() {
+        assert!(config().render().contains("dev/sw_sync"));
+    }
+
+    #[test]
+    fn sound_is_optional() {
+        let mut config = config();
+        assert!(config.render().contains("pulse/native"));
+        config.pulse_socket = None;
+        assert!(!config.render().contains("pulse/native"));
     }
 
     #[test]

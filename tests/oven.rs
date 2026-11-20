@@ -128,31 +128,45 @@ fn the_oven_does_not_pretend_it_can_show_a_window() {
     let scratch = ScratchDir::new("oven-it").expect("scratch");
     let oven = oven(&scratch);
 
+    // No image is registered, so nothing can run whatever the display says.
     let readiness = oven.readiness();
-    assert!(!readiness.display_bridge);
-    assert!(!readiness.can_run_apps());
+    assert!(!readiness.can_start());
+    assert!(!readiness.can_show_windows());
 
     let err = oven.launch("com.example.teapot").unwrap_err().to_string();
-    assert!(err.contains("display bridge"), "{err}");
     assert!(
-        err.contains("Waydroid"),
-        "the working backend must be named:\n{err}"
+        err.contains("system image") || err.contains("LXC") || err.contains("Wayland"),
+        "it must name what is missing:\n{err}"
     );
 }
 
 #[test]
-fn burnt_is_told_about_the_missing_bridge() {
+fn burnt_is_told_what_the_display_is_doing() {
     let scratch = ScratchDir::new("oven-it").expect("scratch");
     let notes = oven(&scratch).health_notes();
 
-    let bridge = notes
+    let display = notes
         .iter()
-        .find(|n| n.label == "display bridge")
-        .expect("the bridge must be reported");
-    assert!(bridge.blocking, "it stops apps running, so it must block");
-    assert!(bridge.advice.is_some());
+        .find(|n| n.label == "display")
+        .expect("the display must be reported");
+    // Whether it blocks depends on the machine; a blocking note must always
+    // carry advice.
+    if display.blocking {
+        assert!(display.advice.is_some(), "a blocking note needs advice");
+    }
 
-    // And the image is reported too, with advice when it is missing.
+    // The one thing the host cannot check has to be stated either way.
+    let caveat = notes
+        .iter()
+        .find(|n| n.label == "image graphics")
+        .expect("the image caveat must be reported");
+    assert!(caveat.advice.is_some());
+    assert!(
+        !caveat.blocking,
+        "it is a caveat, not a failure: it cannot be known either way"
+    );
+
+    // And the image itself is still reported, with advice when missing.
     let image = notes
         .iter()
         .find(|n| n.label == "system image")
@@ -250,6 +264,7 @@ fn the_config_denies_devices_before_allowing_any() {
         binder_devices: vec!["binder".to_string()],
         render_nodes: Vec::new(),
         wayland_socket: None,
+        pulse_socket: None,
         uid: 1000,
         gid: 1000,
     };

@@ -10,6 +10,7 @@
 //! for, and runs exactly one command — it does not keep a privileged helper
 //! around.
 
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -182,7 +183,18 @@ pub fn ensure_mounted(mount_point: &Path) -> Result<PathBuf> {
 
     // Trust the kernel's own view rather than the exit code.
     match state() {
-        BinderState::Ready { mount_point } => Ok(mount_point),
+        BinderState::Ready { mount_point } => {
+            // A fresh binderfs has only its control node; the devices an
+            // Android container needs have to be asked for.
+            match ensure_devices(&mount_point) {
+                Ok(created) if !created.is_empty() => {
+                    crate::ui::step(&format!("created binder devices: {}", created.join(", ")));
+                }
+                Ok(_) => {}
+                Err(err) => return Err(err),
+            }
+            Ok(mount_point)
+        }
         _ => bail!(
             "the mount command succeeded but no binderfs appeared at {}.\n\
              Check /proc/mounts to see what happened.",
@@ -207,6 +219,137 @@ fn create_mount_point(mount_point: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Allocating devices
+// ---------------------------------------------------------------------------
+
+/// A freshly mounted binderfs contains only `binder-control`. The devices
+/// themselves are created by asking that node for them, one at a time.
+pub const CONTROL_NODE: &str = "binder-control";
+
+/// `BINDERFS_MAX_NAME` from the kernel's `linux/android/binderfs.h`.
+const BINDERFS_MAX_NAME: usize = 255;
+
+/// The kernel's `struct binderfs_device`.
+///
+/// The layout is fixed by the kernel ABI: 256 bytes of name followed by two
+/// 32-bit numbers it fills in. Getting this wrong would hand the kernel a
+/// misaligned buffer, so its size is asserted in the tests.
+#[repr(C)]
+struct BinderfsDevice {
+    name: [libc::c_char; BINDERFS_MAX_NAME + 1],
+    major: u32,
+    minor: u32,
+}
+
+/// Build an ioctl request number, the way `<asm-generic/ioctl.h>` does.
+///
+/// x86_64 and aarch64 — the two architectures Cookie targets — both use this
+/// generic encoding. Some others (mips, powerpc, sparc) number the direction
+/// bits differently, which is why this is spelled out rather than assumed.
+const fn ioc(dir: u32, kind: u32, nr: u32, size: u32) -> u32 {
+    (dir << 30) | (size << 16) | (kind << 8) | nr
+}
+
+/// `_IOWR('b', 1, struct binderfs_device)`
+const BINDER_CTL_ADD: u32 = ioc(
+    3, // _IOC_READ | _IOC_WRITE
+    b'b' as u32,
+    1,
+    std::mem::size_of::<BinderfsDevice>() as u32,
+);
+
+/// What the kernel gave back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceNumbers {
+    pub major: u32,
+    pub minor: u32,
+}
+
+/// Ask binderfs to create one device.
+///
+/// Returns the device numbers the kernel assigned. The node itself appears in
+/// the binderfs mount; nothing has to be created by hand.
+pub fn allocate_device(mount_point: &Path, name: &str) -> Result<DeviceNumbers> {
+    if name.is_empty() || name.len() > BINDERFS_MAX_NAME {
+        bail!("`{name}` is not a usable binder device name (1 to {BINDERFS_MAX_NAME} characters)");
+    }
+    if name.contains('\0') || name.contains('/') {
+        bail!("`{name}` is not a usable binder device name");
+    }
+
+    let control = mount_point.join(CONTROL_NODE);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&control)
+        .with_context(|| {
+            format!(
+                "cannot open {} — is binderfs really mounted at {}?",
+                control.display(),
+                mount_point.display()
+            )
+        })?;
+
+    let mut device = BinderfsDevice {
+        name: [0; BINDERFS_MAX_NAME + 1],
+        major: 0,
+        minor: 0,
+    };
+    for (slot, byte) in device.name.iter_mut().zip(name.as_bytes()) {
+        *slot = *byte as libc::c_char;
+    }
+    // The array is zeroed above and `name` is at most BINDERFS_MAX_NAME
+    // bytes, so the last element stays nul and the string is terminated.
+
+    // SAFETY: `device` is a correctly sized, fully initialised
+    // `binderfs_device` owned by this function, and `file` is an open
+    // read-write handle on the binderfs control node for the whole call. The
+    // kernel reads the name and writes the two numbers back into the same
+    // buffer; nothing else aliases it. The return value is checked below.
+    let result = unsafe { libc::ioctl(file.as_raw_fd(), BINDER_CTL_ADD as _, &mut device) };
+
+    if result < 0 {
+        let error = std::io::Error::last_os_error();
+        bail!(
+            "the kernel refused to create the binder device `{name}`: {error}\n\
+             This is the one step that needs binderfs to be mounted and writable."
+        );
+    }
+
+    Ok(DeviceNumbers {
+        major: device.major,
+        minor: device.minor,
+    })
+}
+
+/// Create whichever of the required devices are not there yet.
+///
+/// Returns the names it had to create. Doing nothing is the normal case on a
+/// system where something else already set binderfs up.
+pub fn ensure_devices(mount_point: &Path) -> Result<Vec<String>> {
+    let missing = devices_missing(mount_point);
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if !mount_point.join(CONTROL_NODE).exists() {
+        bail!(
+            "binderfs is mounted at {} but has no {CONTROL_NODE}, so no devices can be \n\
+             created. This usually means something else is mounted there.",
+            mount_point.display()
+        );
+    }
+
+    let mut created = Vec::new();
+    for name in missing {
+        allocate_device(mount_point, &name)
+            .with_context(|| format!("cannot create the binder device `{name}`"))?;
+        created.push(name);
+    }
+    Ok(created)
 }
 
 /// Which of the devices an Android container needs are actually present.
@@ -348,5 +491,70 @@ mod tests {
                 .to_string();
             assert!(err.contains("CONFIG_ANDROID_BINDER_IPC"), "{err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    /// The kernel decides this layout; getting it wrong would hand it a
+    /// buffer of the wrong size.
+    #[test]
+    fn the_device_struct_matches_the_kernel_abi() {
+        assert_eq!(BINDERFS_MAX_NAME, 255);
+        assert_eq!(std::mem::size_of::<BinderfsDevice>(), 256 + 4 + 4);
+        assert_eq!(std::mem::align_of::<BinderfsDevice>(), 4);
+    }
+
+    /// `_IOWR('b', 1, struct binderfs_device)` works out to this. Computed
+    /// independently here so a change to the struct cannot silently change
+    /// the request number.
+    #[test]
+    fn the_ioctl_number_is_what_the_kernel_expects() {
+        assert_eq!(BINDER_CTL_ADD, 0xC108_6201);
+
+        // And the encoding itself, piece by piece.
+        assert_eq!(BINDER_CTL_ADD >> 30, 3, "direction is read+write");
+        assert_eq!((BINDER_CTL_ADD >> 16) & 0x3FFF, 264, "payload size");
+        assert_eq!((BINDER_CTL_ADD >> 8) & 0xFF, u32::from(b'b'), "type");
+        assert_eq!(BINDER_CTL_ADD & 0xFF, 1, "number");
+    }
+
+    #[test]
+    fn unusable_device_names_are_refused_before_any_syscall() {
+        let nowhere = Path::new("/nonexistent/binderfs");
+        for bad in ["", "with/slash", "with\0nul"] {
+            let err = allocate_device(nowhere, bad).unwrap_err().to_string();
+            assert!(err.contains("not a usable"), "{bad:?}: {err}");
+        }
+        let long = "a".repeat(BINDERFS_MAX_NAME + 1);
+        assert!(allocate_device(nowhere, &long).is_err());
+    }
+
+    #[test]
+    fn a_missing_control_node_is_explained_rather_than_erroring_obscurely() {
+        let scratch = crate::paths::ScratchDir::new("binder-alloc").expect("scratch");
+        let err = allocate_device(scratch.path(), "binder")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("binder-control"), "{err}");
+        assert!(err.contains("really mounted"), "{err}");
+    }
+
+    #[test]
+    fn ensuring_devices_on_an_empty_directory_says_what_is_wrong() {
+        let scratch = crate::paths::ScratchDir::new("binder-alloc").expect("scratch");
+        let err = ensure_devices(scratch.path()).unwrap_err().to_string();
+        assert!(err.contains("no binder-control"), "{err}");
+    }
+
+    #[test]
+    fn nothing_is_created_when_everything_is_already_there() {
+        let scratch = crate::paths::ScratchDir::new("binder-alloc").expect("scratch");
+        for name in REQUIRED_DEVICES {
+            std::fs::write(scratch.path().join(name), b"").expect("write");
+        }
+        assert!(ensure_devices(scratch.path()).expect("ensure").is_empty());
     }
 }

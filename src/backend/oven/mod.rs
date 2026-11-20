@@ -23,7 +23,9 @@
 
 pub mod binder;
 pub mod container;
+pub mod display;
 pub mod image;
+pub mod props;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,9 +40,12 @@ use super::{
 };
 use crate::paths;
 use crate::system;
+use crate::ui;
 use binder::BinderState;
 use container::{ContainerConfig, CONTAINER_NAME};
+use display::{DisplayConfig, DisplayReadiness, Graphics};
 use image::Image;
+use props::Properties;
 
 /// Where the oven keeps its things. All under the user's own directories.
 #[derive(Debug, Clone)]
@@ -78,6 +83,13 @@ pub struct OvenRecord {
     /// The registered system image, if one has been added.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub image: Option<Image>,
+
+    /// Properties the user has set, applied over the ones Cookie computes.
+    ///
+    /// This is also where `ro.sf.lcd_density` lives when someone sets it:
+    /// one place for overrides rather than a second source of truth.
+    #[serde(default, skip_serializing_if = "Properties::is_empty")]
+    pub properties: Properties,
 }
 
 /// Everything that has to be true before an app could run.
@@ -86,8 +98,9 @@ pub struct Readiness {
     pub lxc_installed: bool,
     pub binder: BinderState,
     pub image: Option<Image>,
-    /// Always false today. See the module documentation.
-    pub display_bridge: bool,
+    /// Whether there is a Wayland session to draw into, and what graphics
+    /// implementation the Android side should load.
+    pub display: DisplayReadiness,
 }
 
 impl Readiness {
@@ -98,28 +111,41 @@ impl Readiness {
             && self.image.as_ref().map(|i| i.is_present()).unwrap_or(false)
     }
 
-    /// Could an app actually be used? Not yet, and this says so.
-    pub fn can_run_apps(&self) -> bool {
-        self.can_start() && self.display_bridge
+    /// Is there somewhere for an app's window to go?
+    ///
+    /// This says the *host* side is in place. Whether a window actually
+    /// appears also depends on the image carrying a hardware composer that
+    /// speaks Wayland, and that cannot be known without booting it.
+    pub fn can_show_windows(&self) -> bool {
+        self.can_start() && matches!(self.display, DisplayReadiness::Ready { .. })
+    }
+
+    /// The graphics implementation the Android side will be told to load.
+    pub fn graphics(&self) -> Option<&Graphics> {
+        match &self.display {
+            DisplayReadiness::Ready { graphics } => Some(graphics),
+            DisplayReadiness::NoWaylandSocket => None,
+        }
     }
 }
 
-/// The message shown whenever something needs the display bridge.
-pub fn display_bridge_message() -> String {
-    "The oven can prepare and boot the Android container, but it cannot show an app's window \
-     yet.\n\
+/// What Cookie cannot check from the host.
+///
+/// The host side of the display path is Cookie's to get right, and it does.
+/// The other half — the hardware composer that turns Android's surfaces into
+/// Wayland ones — lives inside the system image, and no amount of host-side
+/// inspection can tell whether a given image has one.
+pub fn image_hal_caveat() -> String {
+    "Whether an app's window actually appears depends on the system image.\n\
      \n\
-     An Android app draws through SurfaceFlinger, which needs a hardware-composer \
-     implementation that hands its surfaces to Wayland. That is the largest piece Waydroid \
-     provides, and Cookie does not have its own yet.\n\
+     Android draws through a hardware composer, and in this design that composer is the \
+     Wayland client: it lives inside the image and connects out to the socket Cookie passes \
+     in. A LineageOS build made for Waydroid has one. A stock Android system image does not, \
+     and with such an image the container will boot but nothing will be drawn.\n\
      \n\
-     Until it does, use the Waydroid backend to actually run apps:\n  \
-     cookie eat <file.cpk>            # uses Waydroid, the default\n\
-     \n\
-     The oven is still useful for checking that your kernel, image and container are set up \
-     correctly:\n  \
-     cookie burnt --backend oven\n  \
-     cookie oven status --backend oven"
+     Cookie cannot tell the two apart without starting them, so it does not pretend to. If \
+     apps install but no window appears, that is the first thing to suspect:\n  \
+     cookie crumbs <name> --backend oven"
         .to_string()
 }
 
@@ -170,6 +196,23 @@ impl Oven {
         Ok(image)
     }
 
+    /// Set a property that overrides what Cookie computes.
+    pub fn set_property(&self, key: &str, value: &str) -> Result<()> {
+        let mut record = self.record()?;
+        record.properties.set(key, value)?;
+        self.write_record(&record)
+    }
+
+    /// Drop an override, going back to Cookie's own answer.
+    pub fn unset_property(&self, key: &str) -> Result<bool> {
+        let mut record = self.record()?;
+        let had = record.properties.remove(key);
+        if had {
+            self.write_record(&record)?;
+        }
+        Ok(had)
+    }
+
     /// Forget the registered image.
     pub fn remove_image(&self) -> Result<bool> {
         let mut record = self.record()?;
@@ -186,9 +229,70 @@ impl Oven {
             lxc_installed: cmd::which("lxc-start").is_some(),
             binder: binder::state(),
             image: self.record().ok().and_then(|r| r.image),
-            // See the module documentation.
-            display_bridge: false,
+            display: display::readiness(&system::render_nodes()),
         }
+    }
+
+    /// How the display should be set up on this host.
+    pub fn display_config(&self) -> DisplayConfig {
+        let record = self.record().unwrap_or_default();
+        DisplayConfig {
+            graphics: display::detect(&system::render_nodes(), &display::default_hal_dirs()),
+            density: record
+                .properties
+                .get("ro.sf.lcd_density")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
+            // One window per app is the whole point; there is no reason to
+            // ever ask for the other thing.
+            multi_window: true,
+        }
+    }
+
+    /// The property file handed to the Android side, including anything the
+    /// user has set themselves.
+    pub fn properties(&self) -> Result<Properties> {
+        let mut props = self.display_config().properties()?;
+        props.merge(&self.record().unwrap_or_default().properties);
+        Ok(props)
+    }
+
+    /// Where the property file lands, both on the host and in the container.
+    pub fn props_path(&self) -> PathBuf {
+        self.dirs.data.join("cookie.prop")
+    }
+
+    /// Write the property file into the shared data directory, which the
+    /// container sees as `/data`.
+    pub fn write_properties(&self) -> Result<PathBuf> {
+        let path = self.props_path();
+        self.properties()?.write(&path)?;
+        Ok(path)
+    }
+
+    /// Apply the properties that can be set on a running system.
+    ///
+    /// Only `persist.*` ones: Android fixes `ro.*` properties during init and
+    /// refuses to change them afterwards, which is exactly why the file above
+    /// exists.
+    fn apply_runtime_properties(&self) -> Result<usize> {
+        let props = self.properties()?;
+        let mut applied = 0;
+        for (key, value) in props.iter() {
+            if !key.starts_with("persist.") {
+                continue;
+            }
+            let out = self.attach(&["setprop", key, value])?;
+            if out.ok() {
+                applied += 1;
+            } else {
+                ui::warn(&format!(
+                    "could not set {key}:\n{}",
+                    cmd::indent(&out.message())
+                ));
+            }
+        }
+        Ok(applied)
     }
 
     /// Build the container configuration from what the host actually has.
@@ -200,6 +304,12 @@ impl Oven {
         };
 
         let display = system::display_info();
+        // WAYLAND_DISPLAY comes from the environment, and the container
+        // config is whitespace-separated, so a path with a space in it would
+        // silently mount something else.
+        let wayland_socket = display
+            .wayland_socket
+            .filter(|path| display::socket_path_is_safe(path));
 
         Ok(ContainerConfig {
             rootfs: self.dirs.rootfs.clone(),
@@ -210,7 +320,8 @@ impl Oven {
                 .collect(),
             binder_path,
             render_nodes: system::render_nodes(),
-            wayland_socket: display.wayland_socket,
+            wayland_socket,
+            pulse_socket: pulse_socket(),
             uid: current_uid(),
             gid: current_gid(),
         })
@@ -286,14 +397,6 @@ impl Oven {
     fn lxc_info(&self) -> Result<cmd::Output> {
         cmd::run("lxc-info", &["-n", CONTAINER_NAME, "-H", "-s"])
     }
-}
-
-/// Everything an app command needs, and the one thing it cannot have yet.
-fn not_until_the_bridge(what: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "{what} needs the display bridge.\n\n{}",
-        display_bridge_message()
-    )
 }
 
 impl AndroidBackend for Oven {
@@ -409,6 +512,16 @@ impl AndroidBackend for Oven {
         crate::ui::step("writing the container configuration");
         let config = self.write_container_config()?;
 
+        // Android decides how to draw from these, and only the host knows
+        // what hardware is here, so they have to be written before it boots.
+        let props_path = self.write_properties()?;
+        let display = self.display_config();
+        crate::ui::note(&crate::ui::dim(&format!(
+            "graphics: {} ({})",
+            display.graphics.describe(),
+            paths::tilde(&props_path)
+        )));
+
         crate::ui::step("starting the container");
         let config_path = config.display().to_string();
         let out = cmd::run(
@@ -424,6 +537,14 @@ impl AndroidBackend for Oven {
                 config.display(),
                 config.display()
             );
+        }
+
+        // `persist.*` properties only take on a running system; the `ro.*`
+        // ones were fixed during init from the file written above.
+        match self.apply_runtime_properties() {
+            Ok(0) => {}
+            Ok(n) => crate::ui::note(&crate::ui::dim(&format!("applied {n} properties"))),
+            Err(err) => crate::ui::warn(&format!("could not apply properties: {err}")),
         }
 
         Ok(())
@@ -521,8 +642,34 @@ impl AndroidBackend for Oven {
         Ok(parse_package_list(&out.stdout))
     }
 
-    fn launch(&self, _package: &str) -> Result<()> {
-        Err(not_until_the_bridge("launching an app"))
+    fn launch(&self, package: &str) -> Result<()> {
+        self.ensure_available()?;
+
+        if !matches!(self.readiness().display, DisplayReadiness::Ready { .. }) {
+            bail!("{}", display::no_wayland_message());
+        }
+
+        // `monkey` starts an app by package id without having to resolve its
+        // launcher activity first, which is what `am start` would need.
+        let out = self.attach(&[
+            "monkey",
+            "-p",
+            package,
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "1",
+        ])?;
+
+        let reported = format!("{}{}", out.stdout, out.stderr);
+        if out.ok() && !reported.contains("No activities found") {
+            return Ok(());
+        }
+        bail!(
+            "could not launch {package}:\n{}\n\n\
+             If the app installed but will not start, its own log usually says why:\n  \
+             cookie crumbs {package} --backend oven",
+            cmd::indent(reported.trim())
+        )
     }
 
     fn pid_of(&self, package: &str) -> Result<Option<u32>> {
@@ -537,14 +684,45 @@ impl AndroidBackend for Oven {
             .and_then(|s| s.parse().ok()))
     }
 
-    fn logs(&self, _spec: &LogSpec) -> Result<()> {
-        Err(not_until_the_bridge("reading an app's logs"))
+    fn logs(&self, spec: &LogSpec) -> Result<()> {
+        self.ensure_available()?;
+
+        let mut args: Vec<String> = vec![
+            "lxc-attach".into(),
+            "-n".into(),
+            CONTAINER_NAME.into(),
+            "--".into(),
+            "logcat".into(),
+        ];
+        if !spec.follow {
+            args.push("-d".into());
+        }
+        if let Some(pid) = spec.pid {
+            args.push(format!("--pid={pid}"));
+            if !spec.follow {
+                args.push("-t".into());
+                args.push(spec.lines.to_string());
+            }
+        }
+
+        stream_logs(&args, spec)
     }
 
     fn ensure_multi_window(&self) -> Result<()> {
-        // One window per app is not a mode in the oven, it is the design:
-        // there is no Android home screen to be inside. Nothing to switch on,
-        // and nothing to claim until the bridge exists.
+        // One window per app is the design rather than a mode, but the image
+        // still has to be told, and the property only takes effect on a
+        // running system.
+        if !self.status()?.state.is_running() {
+            return Ok(());
+        }
+        let out = self.attach(&["setprop", "persist.waydroid.multi_windows", "true"])?;
+        if !out.ok() {
+            ui::warn(&format!(
+                "could not ask for one window per app:\n{}\n\
+                 Apps will still run, but inside a single Android screen.",
+                cmd::indent(&out.message())
+            ));
+        }
         Ok(())
     }
 
@@ -635,12 +813,31 @@ impl AndroidBackend for Oven {
             blocking: !readiness.lxc_installed,
         });
 
-        // The honest one.
+        notes.push(match &readiness.display {
+            DisplayReadiness::Ready { graphics } => BackendNote {
+                label: "display".to_string(),
+                detail: format!("{}, one window per app", graphics.describe()),
+                advice: (!graphics.is_accelerated()).then(|| {
+                    "Apps will be drawn in software, which works but is slow. If this machine \
+                     has a GPU, check you are in the `video` and `render` groups."
+                        .to_string()
+                }),
+                blocking: false,
+            },
+            DisplayReadiness::NoWaylandSocket => BackendNote {
+                label: "display".to_string(),
+                detail: "no Wayland socket, so there is nowhere to draw".to_string(),
+                advice: Some(display::no_wayland_message()),
+                blocking: true,
+            },
+        });
+
+        // The one thing the host genuinely cannot check.
         notes.push(BackendNote {
-            label: "display bridge".to_string(),
-            detail: "not built yet, so the oven cannot show an app's window".to_string(),
-            advice: Some(display_bridge_message()),
-            blocking: true,
+            label: "image graphics".to_string(),
+            detail: "cannot be checked without booting the image".to_string(),
+            advice: Some(image_hal_caveat()),
+            blocking: false,
         });
 
         notes
@@ -699,6 +896,86 @@ fn read_proc_id(field: &str) -> Option<u32> {
         .and_then(|value| value.parse().ok())
 }
 
+/// Run a log command and print its output, filtering by package name when
+/// there is no process id to filter by.
+///
+/// Reading the child's output line by line rather than letting it inherit
+/// stdout is what makes `--follow` interruptible and lets the name filter
+/// work at all.
+fn stream_logs(args: &[String], spec: &LogSpec) -> Result<()> {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(&args[0])
+        .args(&args[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("cannot read logs from the container")?;
+
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        bail!("could not capture the container's log output");
+    };
+
+    let needle = spec
+        .pid
+        .is_none()
+        .then(|| spec.package.to_ascii_lowercase());
+    let mut ring: Vec<String> = Vec::new();
+    let mut printed_any = false;
+
+    for line in BufReader::new(stdout).lines() {
+        let Ok(line) = line else { break };
+        let keep = match &needle {
+            None => true,
+            Some(needle) => line.to_ascii_lowercase().contains(needle),
+        };
+        if !keep {
+            continue;
+        }
+        if spec.follow || spec.pid.is_some() {
+            println!("{line}");
+            printed_any = true;
+        } else {
+            ring.push(line);
+            if ring.len() > spec.lines {
+                ring.remove(0);
+            }
+        }
+    }
+
+    for line in &ring {
+        println!("{line}");
+        printed_any = true;
+    }
+
+    let status = child.wait().context("waiting for logcat to finish")?;
+    if !status.success() && !printed_any {
+        let mut stderr_text = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            use std::io::Read;
+            let _ = stderr.read_to_string(&mut stderr_text);
+        }
+        if !stderr_text.trim().is_empty() {
+            bail!(
+                "could not read the Android log:\n{}",
+                cmd::indent(stderr_text.trim())
+            );
+        }
+    }
+    Ok(())
+}
+/// The desktop's audio socket, if it has one.
+///
+/// PipeWire puts a PulseAudio-compatible socket in the same place, so one
+/// lookup covers both.
+fn pulse_socket() -> Option<PathBuf> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)?;
+    let socket = runtime.join("pulse/native");
+    socket.exists().then_some(socket)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,14 +1022,21 @@ mod tests {
     }
 
     #[test]
-    fn readiness_is_honest_about_the_display_bridge() {
+    fn readiness_needs_an_image_before_anything_can_run() {
         let scratch = ScratchDir::new("oven").expect("scratch");
         let readiness = oven(&scratch).readiness();
-        assert!(
-            !readiness.display_bridge,
-            "the bridge does not exist yet and must not claim to"
-        );
-        assert!(!readiness.can_run_apps());
+        assert!(!readiness.can_start(), "nothing is registered yet");
+        assert!(!readiness.can_show_windows());
+    }
+
+    #[test]
+    fn the_image_caveat_is_stated_rather_than_guessed_at() {
+        // Cookie cannot tell whether an image carries a Wayland-capable
+        // composer without booting it, so it has to say so.
+        let caveat = image_hal_caveat();
+        assert!(caveat.contains("depends on the system image"), "{caveat}");
+        assert!(caveat.contains("Waydroid"), "{caveat}");
+        assert!(caveat.contains("cannot tell"), "{caveat}");
     }
 
     #[test]
@@ -784,16 +1068,21 @@ mod tests {
     }
 
     #[test]
-    fn launching_an_app_explains_the_missing_piece() {
+    fn launching_an_app_names_whatever_is_missing() {
         let scratch = ScratchDir::new("oven").expect("scratch");
         let err = oven(&scratch)
             .launch("com.example.teapot")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("display bridge"), "{err}");
-        assert!(err.contains("SurfaceFlinger"), "{err}");
-        // And it points at the backend that does work.
-        assert!(err.contains("Waydroid"), "{err}");
+        // Which piece is absent depends on the machine; the message has to
+        // name one of them rather than fail obscurely.
+        assert!(
+            err.contains("LXC")
+                || err.contains("system image")
+                || err.contains("Wayland")
+                || err.contains("binder"),
+            "{err}"
+        );
     }
 
     #[test]
