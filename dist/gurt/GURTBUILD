@@ -12,7 +12,7 @@ url="https://github.com/clrealy/Cookie"
 license="GPL-3.0-or-later"
 maintainer="clrealy"
 category="system"
-icon="https://raw.githubusercontent.com/clrealy/Cookie/e4d66f7982af3c20f9592eba5d0272d71a3af481/assets/cookie.png"
+icon="https://raw.githubusercontent.com/clrealy/Cookie/0571124c60abc3ab7c5c5b1e386d656f8344d5a6/assets/cookie.png"
 arch=(x86_64 aarch64)
 aliases=(cpk)
 makedepends=(rust git)
@@ -25,7 +25,7 @@ makedepends=(rust git)
 # oven backend uses.
 
 # Pinned to a commit so the build is reproducible: there is no release tag yet.
-source=("cookie::git+https://github.com/clrealy/Cookie.git#commit=e4d66f7982af3c20f9592eba5d0272d71a3af481")
+source=("cookie::git+https://github.com/clrealy/Cookie.git#commit=0571124c60abc3ab7c5c5b1e386d656f8344d5a6")
 sha256sums=(SKIP)
 
 build() {
