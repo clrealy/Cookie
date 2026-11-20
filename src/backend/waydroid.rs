@@ -332,13 +332,23 @@ impl AndroidBackend for Waydroid {
         }
         bail!(
             "Waydroid is not installed, and milestone 1 of Cookie runs on top of it.\n\
-             Install it with your package manager, for example:\n  \
-             Gentoo:  {su} emerge --ask app-emulation/waydroid\n  \
-             Arch:    {su} pacman -S waydroid\n  \
-             Debian:  {su} apt install waydroid\n\
+             {}\n\
              Then set up its Android image once:\n  \
              {su} waydroid init\n\
-             Check how things stand with:\n  cookie burnt"
+             Check how things stand with:\n  cookie burnt",
+            system::install_guidance(
+                "waydroid",
+                &[
+                    (system::Distro::Arch, "pacman -S waydroid".to_string()),
+                    (
+                        system::Distro::Gentoo,
+                        format!("{su} emerge --ask app-emulation/waydroid")
+                    ),
+                    (system::Distro::Debian, format!("{su} apt install waydroid")),
+                    (system::Distro::Fedora, format!("{su} dnf install waydroid")),
+                ],
+                "https://docs.waydro.id/usage/install-on-desktops"
+            )
         )
     }
 

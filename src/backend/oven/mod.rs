@@ -398,13 +398,23 @@ impl AndroidBackend for Oven {
         if !readiness.lxc_installed {
             bail!(
                 "the oven runs the Android container with LXC, which is not installed.\n\
-                 Install it with your package manager, for example:\n  \
-                 Gentoo:  {su} emerge --ask app-containers/lxc\n  \
-                 Arch:    {su} pacman -S lxc\n  \
-                 Debian:  {su} apt install lxc\n\
+                 {}\n\
                  \n\
                  The oven replaces Waydroid, not LXC: Cookie owns the image, binder, \
-                 configuration and lifecycle, and LXC is the engine underneath."
+                 configuration and lifecycle, and LXC is the engine underneath.",
+                system::install_guidance(
+                    "lxc",
+                    &[
+                        (system::Distro::Arch, format!("{su} pacman -S lxc")),
+                        (
+                            system::Distro::Gentoo,
+                            format!("{su} emerge --ask app-containers/lxc")
+                        ),
+                        (system::Distro::Debian, format!("{su} apt install lxc")),
+                        (system::Distro::Fedora, format!("{su} dnf install lxc")),
+                    ],
+                    "https://linuxcontainers.org/lxc/getting-started/"
+                )
             );
         }
 
@@ -823,8 +833,16 @@ impl AndroidBackend for Oven {
             advice: (!readiness.lxc_installed).then(|| {
                 let su = crate::privilege::name();
                 format!(
-                    "The oven runs the container with LXC. Install it, for example:\n  \
-                     {su} emerge --ask app-containers/lxc"
+                    "The oven runs the container with LXC.\n{}",
+                    system::install_advice(&[
+                        (system::Distro::Arch, format!("{su} pacman -S lxc")),
+                        (
+                            system::Distro::Gentoo,
+                            format!("{su} emerge --ask app-containers/lxc")
+                        ),
+                        (system::Distro::Debian, format!("{su} apt install lxc")),
+                        (system::Distro::Fedora, format!("{su} dnf install lxc")),
+                    ])
                 )
             }),
             blocking: !readiness.lxc_installed,

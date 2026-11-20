@@ -91,6 +91,13 @@ Cookie works the same under **OpenRC, systemd, runit and s6**. It never calls
 `systemctl`; when a service needs starting it prints the command for the init
 system you actually run.
 
+Install advice names **your** distribution first, and Cookie asks your
+package manager rather than carrying a baked-in table of who packages what —
+a table that is wrong the day something moves between repositories. Where the
+package manager does not list something, it says so as an observation (a
+stale index looks the same as a missing package) and points at the project's
+own instructions.
+
 It uses **`doas`** wherever it would otherwise use `sudo`, if that is what
 your system has — both for the three things that genuinely need root
 (mounting binderfs and the two images) and for the commands it tells you to
@@ -555,7 +562,7 @@ implementation rather than a rewrite — both are selectable today with
 ## Development
 
 ```sh
-cargo test                              # 345 tests
+cargo test                              # 357 tests
 cargo clippy --all-targets              # clean
 cargo fmt --check                       # clean
 python3 tests/fixtures/make_fixtures.py # regenerate the test APKs
