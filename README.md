@@ -8,6 +8,11 @@
 
 One app, one ordinary desktop window. No Android home screen in the way.
 
+<a href="https://gurtproject.org/?app=cookie"><picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://gurtproject.org/assets/get-on-gurt-dark.svg">
+  <img src="https://gurtproject.org/assets/get-on-gurt.svg" alt="Get now on GURT" width="240">
+</picture></a>
+
 </div>
 
 ---
@@ -105,7 +110,17 @@ run, since advice naming a program you have not got is no advice at all.
 `doas` wins when both are installed, because installing it is a deliberate
 act; `COOKIE_ELEVATE=sudo` overrides that.
 
-### Build it
+### From GURT
+
+```sh
+gurt install cookie
+```
+
+[GURT](https://gurtproject.org) installs any distribution's packages on any
+distribution, so this is the same command whatever you are running. The
+recipe lives in [`dist/gurt/`](dist/gurt/).
+
+### Build it yourself
 
 ```sh
 git clone https://github.com/clrealy/cookie
