@@ -6,7 +6,7 @@
 # machine is missing.
 pkgname=cookie
 pkgver=0.1.0
-pkgrel=1
+pkgrel=4
 pkgdesc="Run Android apps on Linux like they belong there: wrap an APK into a .cpk and open it in its own window"
 url="https://github.com/clrealy/Cookie"
 license="GPL-3.0-or-later"
