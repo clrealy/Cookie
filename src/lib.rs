@@ -23,6 +23,7 @@ pub mod health;
 pub mod jar;
 pub mod notify;
 pub mod paths;
+pub mod privilege;
 pub mod system;
 pub mod ui;
 pub mod update;

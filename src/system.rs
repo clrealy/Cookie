@@ -7,6 +7,179 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Which distribution this is, as far as `/etc/os-release` says.
+///
+/// Used only to order advice: Cookie behaves identically everywhere, but
+/// telling an Arch user to run `emerge` first is noise they have to read
+/// past, and the command that matters to them should be the one they see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Distro {
+    Arch,
+    Debian,
+    Fedora,
+    Gentoo,
+    Alpine,
+    Void,
+    OpenSuse,
+    Unknown,
+}
+
+impl Distro {
+    /// How to name it in advice.
+    pub fn label(self) -> &'static str {
+        match self {
+            Distro::Arch => "Arch",
+            Distro::Debian => "Debian",
+            Distro::Fedora => "Fedora",
+            Distro::Gentoo => "Gentoo",
+            Distro::Alpine => "Alpine",
+            Distro::Void => "Void",
+            Distro::OpenSuse => "openSUSE",
+            Distro::Unknown => "other",
+        }
+    }
+}
+
+/// What distribution is this?
+pub fn distro() -> Distro {
+    let text = std::fs::read_to_string("/etc/os-release")
+        .or_else(|_| std::fs::read_to_string("/usr/lib/os-release"))
+        .unwrap_or_default();
+    distro_from_os_release(&text)
+}
+
+/// Split out so the matching can be tested against real `os-release` files.
+fn distro_from_os_release(text: &str) -> Distro {
+    let field = |key: &str| -> Option<String> {
+        text.lines()
+            .find_map(|line| line.trim().strip_prefix(&format!("{key}=")))
+            .map(|value| value.trim().trim_matches('"').to_ascii_lowercase())
+    };
+
+    // `ID` is exact; `ID_LIKE` catches the derivatives, of which there are
+    // many more than there are bases.
+    let id = field("ID").unwrap_or_default();
+    let like = field("ID_LIKE").unwrap_or_default();
+
+    for candidate in std::iter::once(id.as_str()).chain(like.split_whitespace()) {
+        let found = match candidate {
+            "arch" | "archarm" | "manjaro" | "endeavouros" | "cachyos" => Distro::Arch,
+            "debian" | "ubuntu" | "linuxmint" | "pop" | "raspbian" => Distro::Debian,
+            "fedora" | "rhel" | "centos" | "nobara" => Distro::Fedora,
+            "gentoo" => Distro::Gentoo,
+            "alpine" => Distro::Alpine,
+            "void" => Distro::Void,
+            "opensuse" | "opensuse-tumbleweed" | "opensuse-leap" | "suse" => Distro::OpenSuse,
+            _ => continue,
+        };
+        return found;
+    }
+    Distro::Unknown
+}
+
+/// Render per-distribution install advice, with this machine's first.
+///
+/// Every option is still shown — detection can be wrong, and someone reading
+/// over a shoulder may be on something else — but the one that applies here
+/// is the one at the top.
+pub fn install_advice(options: &[(Distro, String)]) -> String {
+    let here = distro();
+    let width = options
+        .iter()
+        .map(|(d, _)| d.label().len())
+        .max()
+        .unwrap_or(0)
+        + 1;
+
+    let mut ordered: Vec<&(Distro, String)> = options.iter().collect();
+    ordered.sort_by_key(|(d, _)| *d != here);
+
+    ordered
+        .iter()
+        .map(|(d, command)| {
+            format!(
+                "  {:<width$} {command}",
+                format!("{}:", d.label()),
+                width = width
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Advice for installing something, honest about whether this machine can.
+///
+/// Where the package manager can be asked and says no, saying "run pacman -S
+/// waydroid" is advice that fails — on Arch, Waydroid is not in the official
+/// repositories. So the answer is checked rather than assumed, and where it
+/// cannot be checked the upstream instructions carry the weight instead of a
+/// package name baked into this binary years ago.
+pub fn install_guidance(package: &str, options: &[(Distro, String)], upstream: &str) -> String {
+    let here = distro();
+
+    if package_in_repositories(package) == Some(false) {
+        // Carefully worded. A package manager that does not list something
+        // may be missing it, or may just have a stale index — this container
+        // reports `lxc` as absent on Debian purely because `apt update` has
+        // never run. Stating what was observed is true either way; stating
+        // "it is not packaged for Debian" would not be.
+        let user_repository = if here == Distro::Arch {
+            "\nOn Arch, anything outside the official repositories lives in the AUR, reached \
+             with a helper such as `yay` or `paru`."
+        } else {
+            ""
+        };
+        return format!(
+            "Your package manager does not currently list `{package}`. Either it is not \
+             packaged for {}, or its package index needs refreshing.{user_repository}\n\
+             The project's own instructions cover every distribution:\n  {upstream}",
+            here.label()
+        );
+    }
+
+    format!(
+        "Install it with your package manager, for example:\n{}\n\
+         If it is not in your repositories, the project's own instructions cover every \
+         distribution:\n  {upstream}",
+        install_advice(options)
+    )
+}
+
+/// Ask this distribution's package manager whether it has a package.
+///
+/// Cookie runs on the user's machine, so it does not have to carry a baked-in
+/// table of which distribution packages what — a table that is wrong the day
+/// something moves between repositories. It asks.
+///
+/// `None` means the question could not be put: no package manager found, or
+/// one whose query is too slow to run inside an error message. Callers then
+/// give advice that does not depend on the answer.
+pub fn package_in_repositories(name: &str) -> Option<bool> {
+    use crate::backend::cmd;
+
+    // Only managers whose metadata lookup is local and fast. Portage's
+    // search walks the tree and can take many seconds, which is far too long
+    // to spend building an error message, so Gentoo is deliberately absent.
+    let (program, args): (&str, Vec<&str>) = match distro() {
+        Distro::Arch => ("pacman", vec!["-Si", name]),
+        Distro::Debian => ("apt-cache", vec!["show", name]),
+        Distro::Fedora => ("dnf", vec!["--cacheonly", "info", name]),
+        Distro::Alpine => ("apk", vec!["search", "-e", name]),
+        Distro::Void => ("xbps-query", vec!["-R", name]),
+        Distro::OpenSuse => ("zypper", vec!["--non-interactive", "info", name]),
+        Distro::Gentoo | Distro::Unknown => return None,
+    };
+
+    cmd::which(program)?;
+
+    let out = cmd::run(program, &args).ok()?;
+    // `apk search -e` exits zero either way, so an empty result means no.
+    if program == "apk" {
+        return Some(!out.stdout.trim().is_empty());
+    }
+    Some(out.ok())
+}
+
 /// Which service manager is running, as far as we can tell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitSystem {
@@ -30,11 +203,12 @@ impl InitSystem {
 
     /// The command that starts a system service here, for use in advice.
     pub fn start_service_hint(self, service: &str) -> String {
+        let su = crate::privilege::name();
         match self {
-            InitSystem::Systemd => format!("sudo systemctl start {service}"),
-            InitSystem::OpenRc => format!("sudo rc-service {service} start"),
-            InitSystem::Runit => format!("sudo sv up {service}"),
-            InitSystem::S6 => format!("sudo s6-rc -u change {service}"),
+            InitSystem::Systemd => format!("{su} systemctl start {service}"),
+            InitSystem::OpenRc => format!("{su} rc-service {service} start"),
+            InitSystem::Runit => format!("{su} sv up {service}"),
+            InitSystem::S6 => format!("{su} s6-rc -u change {service}"),
             InitSystem::Unknown => {
                 format!("start the `{service}` service however your system does it")
             }
@@ -43,13 +217,14 @@ impl InitSystem {
 
     /// The command that makes a service start at boot.
     pub fn enable_service_hint(self, service: &str) -> String {
+        let su = crate::privilege::name();
         match self {
-            InitSystem::Systemd => format!("sudo systemctl enable --now {service}"),
-            InitSystem::OpenRc => format!("sudo rc-update add {service} default"),
+            InitSystem::Systemd => format!("{su} systemctl enable --now {service}"),
+            InitSystem::OpenRc => format!("{su} rc-update add {service} default"),
             InitSystem::Runit => {
-                format!("sudo ln -s /etc/sv/{service} /var/service/")
+                format!("{su} ln -s /etc/sv/{service} /var/service/")
             }
-            InitSystem::S6 => format!("sudo s6-rc-bundle-update add default {service}"),
+            InitSystem::S6 => format!("{su} s6-rc-bundle-update add default {service}"),
             InitSystem::Unknown => {
                 format!("enable the `{service}` service however your system does it")
             }
@@ -392,17 +567,38 @@ mod tests {
 
     #[test]
     fn init_hints_never_assume_systemd() {
+        let su = crate::privilege::name();
         assert_eq!(
             InitSystem::OpenRc.start_service_hint("waydroid-container"),
-            "sudo rc-service waydroid-container start"
+            format!("{su} rc-service waydroid-container start")
         );
         assert_eq!(
             InitSystem::OpenRc.enable_service_hint("waydroid-container"),
-            "sudo rc-update add waydroid-container default"
+            format!("{su} rc-update add waydroid-container default")
         );
         assert!(InitSystem::Unknown
             .start_service_hint("x")
             .contains("however your system does it"));
+    }
+
+    /// The hints have to name a program the user actually has. On a system
+    /// with doas and no sudo, advice saying "sudo" is no advice at all.
+    #[test]
+    fn init_hints_name_whichever_privilege_command_is_here() {
+        let su = crate::privilege::name();
+        assert!(["doas", "sudo"].contains(&su));
+
+        for hint in [
+            InitSystem::Systemd.start_service_hint("x"),
+            InitSystem::OpenRc.start_service_hint("x"),
+            InitSystem::Runit.start_service_hint("x"),
+            InitSystem::Systemd.enable_service_hint("x"),
+            InitSystem::OpenRc.enable_service_hint("x"),
+        ] {
+            assert!(hint.starts_with(su), "{hint}");
+            // And no leftover placeholder.
+            assert!(!hint.contains("{su}"), "{hint}");
+        }
     }
 
     #[test]
@@ -423,5 +619,166 @@ mod tests {
         let _ = display_info();
         let _ = render_nodes();
         let _ = host_abi();
+    }
+}
+
+#[cfg(test)]
+mod distro_tests {
+    use super::*;
+
+    #[test]
+    fn os_release_id_is_matched() {
+        assert_eq!(distro_from_os_release("ID=arch\n"), Distro::Arch);
+        assert_eq!(distro_from_os_release("ID=gentoo\n"), Distro::Gentoo);
+        assert_eq!(distro_from_os_release("ID=\"fedora\"\n"), Distro::Fedora);
+        assert_eq!(distro_from_os_release("ID=void\n"), Distro::Void);
+    }
+
+    /// There are far more derivatives than bases, and they all set ID_LIKE.
+    #[test]
+    fn derivatives_are_matched_through_id_like() {
+        assert_eq!(
+            distro_from_os_release("ID=endeavouros\nID_LIKE=arch\n"),
+            Distro::Arch
+        );
+        assert_eq!(
+            distro_from_os_release("ID=ubuntu\nID_LIKE=debian\n"),
+            Distro::Debian
+        );
+        assert_eq!(
+            distro_from_os_release("ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n"),
+            Distro::Debian
+        );
+        assert_eq!(
+            distro_from_os_release("ID=nobara\nID_LIKE=\"fedora\"\n"),
+            Distro::Fedora
+        );
+    }
+
+    #[test]
+    fn an_exact_id_beats_a_vaguer_id_like() {
+        // CachyOS is arch-based; the ID should win over anything in ID_LIKE.
+        assert_eq!(
+            distro_from_os_release("ID=cachyos\nID_LIKE=arch\n"),
+            Distro::Arch
+        );
+    }
+
+    #[test]
+    fn something_unrecognised_is_unknown_rather_than_a_guess() {
+        assert_eq!(distro_from_os_release("ID=plan9\n"), Distro::Unknown);
+        assert_eq!(distro_from_os_release(""), Distro::Unknown);
+        assert_eq!(distro_from_os_release("garbage"), Distro::Unknown);
+    }
+
+    #[test]
+    fn advice_puts_this_machines_distribution_first() {
+        let options = vec![
+            (Distro::Gentoo, "emerge --ask x".to_string()),
+            (Distro::Arch, "pacman -S x".to_string()),
+            (Distro::Debian, "apt install x".to_string()),
+        ];
+        let rendered = install_advice(&options);
+
+        // Every option is still shown — detection can be wrong.
+        assert!(rendered.contains("emerge"), "{rendered}");
+        assert!(rendered.contains("pacman"), "{rendered}");
+        assert!(rendered.contains("apt install"), "{rendered}");
+
+        // And the one for this machine, if it is in the list, leads.
+        let here = distro();
+        if options.iter().any(|(d, _)| *d == here) {
+            let first = rendered.lines().next().unwrap_or_default();
+            assert!(
+                first.contains(here.label()),
+                "{} should lead:\n{rendered}",
+                here.label()
+            );
+        }
+    }
+
+    #[test]
+    fn advice_lines_up_in_a_column() {
+        let rendered = install_advice(&[
+            (Distro::Arch, "a".to_string()),
+            (Distro::OpenSuse, "b".to_string()),
+        ]);
+        let starts: Vec<usize> = rendered
+            .lines()
+            .map(|l| l.rfind(' ').unwrap_or(0))
+            .collect();
+        assert_eq!(starts.len(), 2);
+        assert_eq!(starts[0], starts[1], "commands must align:\n{rendered}");
+    }
+
+    #[test]
+    fn asking_the_package_manager_never_panics_here() {
+        // Whatever this machine is, the question must be safe to put.
+        let _ = package_in_repositories("definitely-not-a-real-package-xyz");
+    }
+}
+
+#[cfg(test)]
+mod guidance_tests {
+    use super::*;
+
+    /// A package manager with a stale index reports things as absent that
+    /// are not. The wording has to survive that, so it says what was seen
+    /// rather than making a claim about the distribution.
+    #[test]
+    fn absence_is_reported_as_an_observation_not_a_fact() {
+        let guidance = install_guidance(
+            "definitely-not-a-real-package-xyz",
+            &[(Distro::Arch, "pacman -S x".to_string())],
+            "https://example.invalid/install",
+        );
+
+        if guidance.contains("does not currently list") {
+            assert!(
+                guidance.contains("index needs refreshing"),
+                "a stale index is the other explanation, and must be offered:\n{guidance}"
+            );
+            assert!(
+                !guidance.contains("is not in"),
+                "that would be a claim about the distribution:\n{guidance}"
+            );
+        }
+        // Either way, upstream is named.
+        assert!(
+            guidance.contains("https://example.invalid/install"),
+            "{guidance}"
+        );
+    }
+
+    /// The AUR exists on Arch and nowhere else, so mentioning it anywhere
+    /// else is noise at best and wrong at worst.
+    #[test]
+    fn the_aur_is_mentioned_only_on_arch() {
+        let guidance = install_guidance(
+            "definitely-not-a-real-package-xyz",
+            &[(Distro::Arch, "pacman -S x".to_string())],
+            "https://example.invalid/install",
+        );
+        if distro() != Distro::Arch {
+            assert!(
+                !guidance.contains("AUR"),
+                "the AUR has nothing to do with {}:\n{guidance}",
+                distro().label()
+            );
+        }
+    }
+
+    #[test]
+    fn guidance_never_carries_a_placeholder() {
+        let guidance = install_guidance(
+            "bash",
+            &[
+                (Distro::Arch, "pacman -S bash".to_string()),
+                (Distro::Debian, "apt install bash".to_string()),
+            ],
+            "https://example.invalid/install",
+        );
+        assert!(!guidance.contains("{}"), "{guidance}");
+        assert!(!guidance.contains("{su}"), "{guidance}");
     }
 }

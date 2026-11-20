@@ -114,8 +114,21 @@ pub fn run(backend: &dyn AndroidBackend) -> Result<Report> {
 /// Cookie never builds or ships a kernel module. If binder is missing, the
 /// only honest answer is which config options to turn on.
 fn check_kernel_binder() -> Check {
-    let support = system::binder_support();
-    let release = system::kernel_release().unwrap_or_else(|| "unknown".to_string());
+    kernel_binder_check(
+        &system::binder_support(),
+        &system::kernel_release().unwrap_or_else(|| "unknown".to_string()),
+    )
+}
+
+/// The advice for a given kernel, as a pure function of what it offers.
+///
+/// Split out from the host lookup deliberately. A test that reads the real
+/// kernel passes or fails depending on the machine it runs on, and one that
+/// did exactly that got through CI here and then failed on a Gentoo box whose
+/// kernel *does* have binder — asserting advice that only applies to a kernel
+/// that does not. Every branch is now reachable from a test.
+pub fn kernel_binder_check(support: &system::BinderSupport, release: &str) -> Check {
+    let su = crate::privilege::name();
 
     let kernel_fix = format!(
         "Your kernel ({release}) needs Android binder support. Cookie will not build or load \
@@ -125,7 +138,7 @@ fn check_kernel_binder() -> Check {
          CONFIG_ANDROID_BINDERFS=y     (or =m)\n\
          On Gentoo:\n  \
          Device Drivers -> Android -> Android Drivers\n  \
-         sudo make menuconfig && sudo make && sudo make modules_install && sudo make install\n\
+         {su} make menuconfig && {su} make && {su} make modules_install && {su} make install\n\
          Some distributions ship it as a separate package instead, such as \
          `binder_linux-dkms` on Debian or `binder_linux-dkms` from the AUR."
     );
@@ -151,10 +164,12 @@ fn check_kernel_binder() -> Check {
         return Check::warn(
             "kernel binder support",
             "a binder module is installed but not loaded",
-            "Load it now:\n  \
-             sudo modprobe binder_linux\n\
-             To load it at every boot, add `binder_linux` to your module list \
-             (on OpenRC that is /etc/modules-load.d/binder.conf).",
+            format!(
+                "Load it now:\n  \
+                 {su} modprobe binder_linux\n\
+                 To load it at every boot, add `binder_linux` to your module list \
+                 (on OpenRC that is /etc/modules-load.d/binder.conf)."
+            ),
         );
     }
 
@@ -183,7 +198,13 @@ fn check_kernel_binder() -> Check {
 
 /// Is binderfs actually mounted where the runtime expects it?
 fn check_binderfs_mount() -> Check {
-    let support = system::binder_support();
+    binderfs_mount_check(&system::binder_support())
+}
+
+/// As above: a pure function of what the kernel offers, so every branch is
+/// reachable from a test rather than only on a machine in that state.
+pub fn binderfs_mount_check(support: &system::BinderSupport) -> Check {
+    let su = crate::privilege::name();
     match &support.binderfs_mounted {
         Some(mount) => Check::ok("binderfs mount", mount.display().to_string()),
         None if !support.devices.is_empty() => Check::ok(
@@ -193,10 +214,12 @@ fn check_binderfs_mount() -> Check {
         None if support.binderfs_filesystem => Check::warn(
             "binderfs mount",
             "not mounted yet",
-            "The backend mounts it on start, so this usually sorts itself out:\n  \
-             cookie oven start\n\
-             To mount it by hand:\n  \
-             sudo mkdir -p /dev/binderfs && sudo mount -t binder binder /dev/binderfs",
+            format!(
+                "The backend mounts it on start, so this usually sorts itself out:\n  \
+                 cookie oven start\n\
+                 To mount it by hand:\n  \
+                 {su} mkdir -p /dev/binderfs && {su} mount -t binder binder /dev/binderfs"
+            ),
         ),
         None => Check::warn(
             "binderfs mount",
@@ -247,16 +270,19 @@ fn check_display() -> Check {
 
 /// Is there a GPU render node for hardware acceleration?
 fn check_gpu() -> Check {
+    let su = crate::privilege::name();
     let nodes = system::render_nodes();
     if nodes.is_empty() {
         return Check::warn(
             "gpu",
             "no render node under /dev/dri",
-            "Apps will fall back to software rendering, which is slow but works.\n\
-             If you have a GPU, make sure its driver is loaded and that you are in the \
-             `video` or `render` group:\n  \
-             sudo usermod -aG video,render $USER\n\
-             Then log out and back in.",
+            format!(
+                "Apps will fall back to software rendering, which is slow but works.\n\
+                 If you have a GPU, make sure its driver is loaded and that you are in the \
+                 `video` or `render` group:\n  \
+                 {su} usermod -aG video,render $USER\n\
+                 Then log out and back in."
+            ),
         );
     }
 
@@ -279,9 +305,11 @@ fn check_gpu() -> Check {
         Check::warn(
             "gpu",
             format!("{} present but not readable by you", names.join(", ")),
-            "Add yourself to the render group so the Android runtime can use the GPU:\n  \
-             sudo usermod -aG video,render $USER\n\
-             Then log out and back in.",
+            format!(
+                "Add yourself to the render group so the Android runtime can use the GPU:\n  \
+                 {su} usermod -aG video,render $USER\n\
+                 Then log out and back in."
+            ),
         )
     }
 }
@@ -300,6 +328,7 @@ fn check_backend(backend: &dyn AndroidBackend) -> Check {
 
 /// Is the shared Android runtime up?
 fn check_oven(backend: &dyn AndroidBackend) -> Check {
+    let su = crate::privilege::name();
     let status = match backend.status() {
         Ok(status) => status,
         Err(err) => {
@@ -340,9 +369,11 @@ fn check_oven(backend: &dyn AndroidBackend) -> Check {
         OvenState::NotInitialized => Check::fail(
             "oven",
             "the Android image has never been set up",
-            "This downloads a system image and needs root, so run it once yourself:\n  \
-             sudo waydroid init\n\
-             Add `-s GAPPS` if you want Google apps. Then: cookie oven start",
+            format!(
+                "This downloads a system image and needs root, so run it once yourself:\n  \
+                 {su} waydroid init\n\
+                 Add `-s GAPPS` if you want Google apps. Then: cookie oven start"
+            ),
         ),
         OvenState::NotInstalled => Check::fail(
             "oven",
@@ -561,17 +592,26 @@ mod tests {
         assert_eq!(report.warnings(), 0);
     }
 
+    /// Every check that is not `Ok` must say what to do about it.
+    ///
+    /// Driven through the pure binder checks rather than the host's own
+    /// kernel, so it covers the branches this machine is not in.
     #[test]
     fn every_failing_check_carries_a_fix() {
-        let report = Report {
-            checks: vec![
-                check_kernel_binder(),
-                check_binderfs_mount(),
-                check_display(),
-                check_gpu(),
-            ],
-        };
-        for check in &report.checks {
+        let mut checks = vec![check_display(), check_gpu(), check_desktop_integration()];
+        for shape in [
+            support(Some("/dev/binderfs"), &[], true, false, Some(true)),
+            support(None, &["/dev/binder"], false, false, None),
+            support(None, &[], true, false, Some(true)),
+            support(None, &[], false, true, Some(true)),
+            support(None, &[], false, false, Some(false)),
+            support(None, &[], false, false, None),
+        ] {
+            checks.push(kernel_binder_check(&shape, "6.12.0"));
+            checks.push(binderfs_mount_check(&shape));
+        }
+
+        for check in &checks {
             if check.level == Level::Fail || check.level == Level::Warn {
                 assert!(
                     check.fix.is_some(),
@@ -582,12 +622,118 @@ mod tests {
         }
     }
 
+    /// Build a `BinderSupport` describing a particular kind of kernel.
+    fn support(
+        mounted: Option<&str>,
+        devices: &[&str],
+        filesystem: bool,
+        module: bool,
+        config: Option<bool>,
+    ) -> system::BinderSupport {
+        system::BinderSupport {
+            binderfs_filesystem: filesystem,
+            binderfs_mounted: mounted.map(std::path::PathBuf::from),
+            devices: devices.iter().map(std::path::PathBuf::from).collect(),
+            config_binder_ipc: config,
+            config_binderfs: config,
+            module_available: module,
+        }
+    }
+
+    /// Regression test for a failure found on real hardware.
+    ///
+    /// This used to call `check_kernel_binder()`, which reads the running
+    /// kernel — so it asserted whatever advice *this* machine happened to
+    /// produce. It passed on a machine with no binder at all and failed on a
+    /// Gentoo box whose kernel has it, because there the advice correctly
+    /// says to mount binderfs rather than to rebuild the kernel.
+    ///
+    /// The config options belong in the advice only when the kernel actually
+    /// lacks support, so that is what is asserted, branch by branch.
     #[test]
-    fn kernel_advice_names_the_config_options() {
-        let check = check_kernel_binder();
-        if let Some(fix) = &check.fix {
+    fn the_config_options_are_named_only_when_the_kernel_lacks_support() {
+        // No binder of any kind: the only useful answer is which options to
+        // turn on.
+        for config in [Some(false), None] {
+            let check = kernel_binder_check(&support(None, &[], false, false, config), "6.12.0");
+            assert_eq!(check.level, Level::Fail);
+            let fix = check.fix.as_deref().unwrap_or_default();
             assert!(fix.contains("CONFIG_ANDROID_BINDER_IPC"), "{fix}");
             assert!(fix.contains("CONFIG_ANDROID_BINDERFS"), "{fix}");
+        }
+
+        // The kernel has binderfs but nothing is mounted — which is the case
+        // that broke this test. Telling the user to rebuild their kernel here
+        // would be wrong.
+        let check = kernel_binder_check(&support(None, &[], true, false, Some(true)), "6.12.0");
+        assert_eq!(check.level, Level::Warn);
+        let fix = check.fix.as_deref().unwrap_or_default();
+        assert!(
+            !fix.contains("CONFIG_ANDROID_BINDER_IPC"),
+            "the kernel already has it; this advice is wrong:\n{fix}"
+        );
+        assert!(fix.contains("cookie oven start"), "{fix}");
+    }
+
+    #[test]
+    fn a_ready_kernel_is_reported_as_ready() {
+        let mounted = kernel_binder_check(
+            &support(Some("/dev/binderfs"), &[], true, false, Some(true)),
+            "6.12.0",
+        );
+        assert_eq!(mounted.level, Level::Ok);
+        assert!(mounted.detail.contains("/dev/binderfs"), "{mounted:?}");
+
+        let legacy = kernel_binder_check(
+            &support(None, &["/dev/binder"], false, false, None),
+            "6.12.0",
+        );
+        assert_eq!(legacy.level, Level::Ok);
+    }
+
+    #[test]
+    fn an_unloaded_module_is_told_to_be_loaded_not_rebuilt() {
+        let check = kernel_binder_check(&support(None, &[], false, true, Some(true)), "6.12.0");
+        assert_eq!(check.level, Level::Warn);
+        let fix = check.fix.as_deref().unwrap_or_default();
+        assert!(fix.contains("modprobe binder_linux"), "{fix}");
+        assert!(!fix.contains("CONFIG_ANDROID_BINDER_IPC"), "{fix}");
+    }
+
+    /// Every branch of both binder checks, including the ones this machine is
+    /// not in. The placeholder guard only covers code that actually runs, and
+    /// three unsubstituted `{su}` placeholders reached users by sitting in
+    /// branches no test ever entered.
+    #[test]
+    fn no_binder_advice_carries_an_unsubstituted_placeholder() {
+        let shapes = [
+            support(Some("/dev/binderfs"), &[], true, false, Some(true)),
+            support(None, &["/dev/binder"], false, false, None),
+            support(None, &[], true, false, Some(true)),
+            support(None, &[], false, true, Some(true)),
+            support(None, &[], false, false, Some(false)),
+            support(None, &[], false, false, None),
+        ];
+
+        for shape in &shapes {
+            for check in [
+                kernel_binder_check(shape, "6.12.0"),
+                binderfs_mount_check(shape),
+            ] {
+                assert!(
+                    !check.detail.contains("{su}") && !check.detail.contains("{}"),
+                    "`{}` detail: {}",
+                    check.label,
+                    check.detail
+                );
+                if let Some(fix) = &check.fix {
+                    assert!(
+                        !fix.contains("{su}") && !fix.contains("{}"),
+                        "`{}` fix:\n{fix}",
+                        check.label
+                    );
+                }
+            }
         }
     }
 

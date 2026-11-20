@@ -39,10 +39,13 @@ fn an_image_is_checked_before_it_is_accepted() {
     let path = scratch.path().join("system.img");
     fake_ext4(&path);
 
-    let registered = oven.add_image(&path).expect("add");
-    assert_eq!(registered.format, image::ImageFormat::Ext4);
-    assert!(registered.is_present());
-    assert!(registered.path.is_absolute(), "the path must be resolved");
+    let registered = oven.add_images(&path, None).expect("add");
+    assert_eq!(registered.system.format, image::ImageFormat::Ext4);
+    assert!(registered.system.is_present());
+    assert!(
+        registered.system.path.is_absolute(),
+        "the path must be resolved"
+    );
 }
 
 #[test]
@@ -53,15 +56,15 @@ fn registration_persists_across_handles() {
     let path = scratch.path().join("system.img");
     fake_ext4(&path);
     Oven::with_dirs(OvenDirs::under(&root))
-        .add_image(&path)
+        .add_images(&path, None)
         .expect("add");
 
     // A completely separate handle reads it back.
     let reopened = Oven::with_dirs(OvenDirs::under(&root));
     let record = reopened.record().expect("record");
-    assert!(record.image.is_some());
+    assert!(record.system.is_some());
     assert_eq!(
-        record.image.as_ref().map(|i| i.format),
+        record.system.as_ref().map(|i| i.format),
         Some(image::ImageFormat::Ext4)
     );
 }
@@ -73,7 +76,7 @@ fn an_image_that_changed_under_us_is_not_trusted() {
 
     let path = scratch.path().join("system.img");
     fake_ext4(&path);
-    oven.add_image(&path).expect("add");
+    oven.add_images(&path, None).expect("add");
     assert!(oven.readiness().can_start() || !oven.readiness().lxc_installed);
 
     // Something replaced the file.
@@ -81,7 +84,7 @@ fn an_image_that_changed_under_us_is_not_trusted() {
     let image = oven
         .record()
         .expect("record")
-        .image
+        .system
         .expect("still recorded");
     assert!(!image.is_present());
     assert!(!oven.readiness().can_start());
@@ -94,7 +97,7 @@ fn forgetting_an_image_leaves_the_file_alone() {
 
     let path = scratch.path().join("system.img");
     fake_ext4(&path);
-    oven.add_image(&path).expect("add");
+    oven.add_images(&path, None).expect("add");
 
     assert!(oven.remove_image().expect("remove"));
     assert_eq!(oven.record().expect("record"), OvenRecord::default());
@@ -110,11 +113,14 @@ fn a_sparse_image_is_named_as_such_rather_than_rejected_vaguely() {
     data[0..4].copy_from_slice(&0xED26_FF3Au32.to_le_bytes());
     fs::write(&path, &data).expect("write");
 
-    let err = oven(&scratch).add_image(&path).unwrap_err().to_string();
+    let err = oven(&scratch)
+        .add_images(&path, None)
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("sparse"), "{err}");
     assert!(err.contains("simg2img"), "{err}");
     // And nothing was recorded.
-    assert!(oven(&scratch).record().expect("record").image.is_none());
+    assert!(oven(&scratch).record().expect("record").system.is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -128,31 +134,45 @@ fn the_oven_does_not_pretend_it_can_show_a_window() {
     let scratch = ScratchDir::new("oven-it").expect("scratch");
     let oven = oven(&scratch);
 
+    // No image is registered, so nothing can run whatever the display says.
     let readiness = oven.readiness();
-    assert!(!readiness.display_bridge);
-    assert!(!readiness.can_run_apps());
+    assert!(!readiness.can_start());
+    assert!(!readiness.can_show_windows());
 
     let err = oven.launch("com.example.teapot").unwrap_err().to_string();
-    assert!(err.contains("display bridge"), "{err}");
     assert!(
-        err.contains("Waydroid"),
-        "the working backend must be named:\n{err}"
+        err.contains("system image") || err.contains("LXC") || err.contains("Wayland"),
+        "it must name what is missing:\n{err}"
     );
 }
 
 #[test]
-fn burnt_is_told_about_the_missing_bridge() {
+fn burnt_is_told_what_the_display_is_doing() {
     let scratch = ScratchDir::new("oven-it").expect("scratch");
     let notes = oven(&scratch).health_notes();
 
-    let bridge = notes
+    let display = notes
         .iter()
-        .find(|n| n.label == "display bridge")
-        .expect("the bridge must be reported");
-    assert!(bridge.blocking, "it stops apps running, so it must block");
-    assert!(bridge.advice.is_some());
+        .find(|n| n.label == "display")
+        .expect("the display must be reported");
+    // Whether it blocks depends on the machine; a blocking note must always
+    // carry advice.
+    if display.blocking {
+        assert!(display.advice.is_some(), "a blocking note needs advice");
+    }
 
-    // And the image is reported too, with advice when it is missing.
+    // The one thing the host cannot check has to be stated either way.
+    let caveat = notes
+        .iter()
+        .find(|n| n.label == "image graphics")
+        .expect("the image caveat must be reported");
+    assert!(caveat.advice.is_some());
+    assert!(
+        !caveat.blocking,
+        "it is a caveat, not a failure: it cannot be known either way"
+    );
+
+    // And the image itself is still reported, with advice when missing.
     let image = notes
         .iter()
         .find(|n| n.label == "system image")
@@ -250,6 +270,9 @@ fn the_config_denies_devices_before_allowing_any() {
         binder_devices: vec!["binder".to_string()],
         render_nodes: Vec::new(),
         wayland_socket: None,
+        pulse_socket: None,
+        cgroup_v2: true,
+        host_egl_dirs: Vec::new(),
         uid: 1000,
         gid: 1000,
     };
@@ -348,4 +371,126 @@ fn window_classes_do_not_collide_with_waydroids() {
         "two backends must not claim the same window class"
     );
     assert_eq!(oven_class.as_deref(), Some("cookie.com.example.teapot"));
+}
+
+// ---------------------------------------------------------------------------
+// The container root, assembled for real
+// ---------------------------------------------------------------------------
+
+/// Can this machine actually mount things?
+///
+/// The assembly test below does real loop and overlay mounts, so it only
+/// runs where that is possible. Skipping is better than a test that passes
+/// by not testing anything, so it says when it skips.
+fn can_really_mount() -> bool {
+    let root = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find_map(|l| l.strip_prefix("Uid:"))
+                .and_then(|v| v.split_whitespace().next().map(str::to_string))
+        })
+        .map(|uid| uid == "0")
+        .unwrap_or(false);
+    root && Path::new("/dev/loop-control").exists()
+}
+
+/// Build a real ext4 image with the directories an Android image has.
+fn real_ext4_image(path: &Path, scratch: &Path) -> bool {
+    let build = scratch.join(format!(
+        "build-{}",
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    for dir in ["dev", "data", "vendor", "system", "proc", "sys"] {
+        if std::fs::create_dir_all(build.join(dir)).is_err() {
+            return false;
+        }
+    }
+    let _ = std::fs::write(build.join("init"), b"");
+
+    let ok = std::process::Command::new("truncate")
+        .args(["-s", "64M"])
+        .arg(path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        return false;
+    }
+
+    std::process::Command::new("mkfs.ext4")
+        .args(["-q", "-F", "-d"])
+        .arg(&build)
+        .arg(path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// The blocker this whole layer exists to fix: on a bare read-only image,
+/// the container cannot create the device nodes and mount points it needs.
+/// With the overlay it can.
+#[test]
+fn the_assembled_root_is_writable_where_a_bare_image_is_not() {
+    if !can_really_mount() {
+        eprintln!("skipping: needs root and loop devices to mount anything");
+        return;
+    }
+
+    let scratch = ScratchDir::new("oven-assemble").expect("scratch");
+    let system_path = scratch.path().join("system.img");
+    let vendor_path = scratch.path().join("vendor.img");
+    if !real_ext4_image(&system_path, scratch.path())
+        || !real_ext4_image(&vendor_path, scratch.path())
+    {
+        eprintln!("skipping: could not build test images");
+        return;
+    }
+
+    let oven = Oven::with_dirs(OvenDirs::under(&scratch.path().join("oven")));
+    let set = oven
+        .add_images(&system_path, Some(&vendor_path))
+        .expect("register both images");
+    let layers = oven.layers();
+
+    cookie::backend::oven::mount::assemble(&layers, &set.system, set.vendor.as_ref())
+        .expect("assemble the container root");
+
+    // Everything that failed on a bare read-only image.
+    let created = [
+        layers.rootfs.join("dev/binder"),
+        layers.rootfs.join("dev/sw_sync"),
+        layers.rootfs.join("run/xdg"),
+        layers.rootfs.join("vendor/waydroid.prop"),
+    ];
+    for path in &created {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .unwrap_or_else(|e| panic!("cannot create {}: {e}", parent.display()));
+        }
+        std::fs::write(path, b"")
+            .unwrap_or_else(|e| panic!("cannot create {}: {e}", path.display()));
+    }
+
+    // The vendor image is mounted in its own right, not just a directory.
+    assert!(
+        cookie::backend::oven::mount::is_mounted(&layers.rootfs.join("vendor")),
+        "the vendor image must be mounted at rootfs/vendor"
+    );
+
+    // Writes went to the upper layer, leaving the images untouched.
+    assert!(
+        layers.upper.join("system/dev/binder").exists(),
+        "writes must land in the overlay, not the image"
+    );
+
+    // And it all comes apart again.
+    let problems = cookie::backend::oven::mount::disassemble(&layers);
+    assert!(problems.is_empty(), "unmount problems: {problems:?}");
+    assert!(
+        !cookie::backend::oven::mount::is_mounted(&layers.rootfs),
+        "nothing should be left mounted"
+    );
 }

@@ -4,7 +4,9 @@ use anyhow::Result;
 
 use crate::backend::oven::{Oven, OvenDirs};
 use crate::backend::{self, OvenState};
-use crate::cli::{OvenAction, OvenArgs, OvenImageAction, OvenImageArgs};
+use crate::cli::{
+    OvenAction, OvenArgs, OvenImageAction, OvenImageArgs, OvenPropAction, OvenPropArgs,
+};
 use crate::health;
 use crate::paths;
 use crate::ui::{self, Level};
@@ -38,6 +40,8 @@ pub fn run(args: &OvenArgs, backend_name: &str, verbose: bool) -> Result<i32> {
         OvenAction::Image(image_args) => image(image_args),
 
         OvenAction::Recipe => recipe(),
+
+        OvenAction::Prop(prop_args) => prop(prop_args),
 
         OvenAction::Status => {
             let status = backend.status()?;
@@ -115,14 +119,32 @@ fn image(args: &OvenImageArgs) -> Result<i32> {
     match args.action.as_ref().unwrap_or(&OvenImageAction::Show) {
         OvenImageAction::Add(add) => {
             ui::step(&format!("checking {}", add.path.display()));
-            let image = oven.add_image(&add.path)?;
-            ui::success("Registered the system image.");
+            let set = oven.add_images(&add.path, add.vendor.as_deref())?;
+            ui::success("Registered the images.");
             ui::note(&format!(
-                "path    {}\nformat  {}\nsize    {}",
-                paths::tilde(&image.path),
-                image.format.label(),
-                ui::bytes(image.size)
+                "system  {}  ({}, {})",
+                paths::tilde(&set.system.path),
+                set.system.format.label(),
+                ui::bytes(set.system.size)
             ));
+            match &set.vendor {
+                Some(vendor) => ui::note(&format!(
+                    "vendor  {}  ({}, {})",
+                    paths::tilde(&vendor.path),
+                    vendor.format.label(),
+                    ui::bytes(vendor.size)
+                )),
+                None => {
+                    println!();
+                    ui::warn(
+                        "no vendor image was registered, and the oven cannot start without \
+                         one.\nAndroid's hardware layers live in /vendor — the graphics ones \
+                         included.\nRegister it with:\n  cookie oven image add <system.img> \
+                         <vendor.img>",
+                    );
+                    return Ok(1);
+                }
+            }
             println!();
             println!(
                 "  Light the oven with:  {}",
@@ -143,7 +165,19 @@ fn image(args: &OvenImageArgs) -> Result<i32> {
 
         OvenImageAction::Show => {
             let record = oven.record()?;
-            match record.image {
+            if let Some(vendor) = &record.vendor {
+                ui::heading("Vendor image");
+                ui::status_line(
+                    if vendor.is_present() {
+                        Level::Ok
+                    } else {
+                        Level::Fail
+                    },
+                    "path",
+                    &paths::tilde(&vendor.path),
+                );
+            }
+            match record.system {
                 Some(image) if image.is_present() => {
                     ui::heading("System image");
                     ui::status_line(Level::Ok, "path", &paths::tilde(&image.path));
@@ -198,4 +232,54 @@ fn recipe() -> Result<i32> {
     );
     print!("{}", config.render());
     Ok(0)
+}
+
+/// `cookie oven prop` — the Android properties the oven hands to the image.
+fn prop(args: &OvenPropArgs) -> Result<i32> {
+    let oven = Oven::with_dirs(OvenDirs::user()?);
+
+    match args.action.as_ref().unwrap_or(&OvenPropAction::List) {
+        OvenPropAction::Set(set) => {
+            oven.set_property(&set.key, &set.value)?;
+            ui::success(&format!("{} = {}", set.key, set.value));
+            ui::note(&ui::dim(
+                "Properties starting with ro. are fixed while Android boots, so this takes\n\
+                 effect the next time the oven starts.",
+            ));
+            Ok(0)
+        }
+
+        OvenPropAction::Unset(unset) => {
+            if oven.unset_property(&unset.key)? {
+                ui::success(&format!("{} is back to Cookie's own answer", unset.key));
+            } else {
+                println!("{} was not overridden.", unset.key);
+            }
+            Ok(0)
+        }
+
+        OvenPropAction::List => {
+            let props = oven.properties()?;
+            let overrides = oven.record()?.properties;
+
+            ui::heading("Android properties");
+            let width = props.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+            for (key, value) in props.iter() {
+                let source = if overrides.get(key).is_some() {
+                    ui::yellow("set by you")
+                } else {
+                    ui::dim("worked out")
+                };
+                println!("  {key:<width$}  {value}  {source}");
+            }
+
+            println!();
+            println!(
+                "  {}  {}",
+                ui::dim("override:"),
+                ui::cyan("cookie oven prop set <name> <value>")
+            );
+            Ok(0)
+        }
+    }
 }

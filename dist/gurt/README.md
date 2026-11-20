@@ -38,6 +38,25 @@ runtime dependencies at all.
 If `waydroid` and `lxc` are ever added to GURT's `deps.map`, promoting them to
 `depends=(waydroid)` and an optional note is a one-line change.
 
+### Repointing it
+
+Use the script, not an editor:
+
+```sh
+dist/gurt/repoint.sh          # pins HEAD
+dist/gurt/repoint.sh <commit> # or a specific one
+```
+
+It moves the pinned commit **and** bumps `pkgrel`, because those two have to
+move together. gurt decides whether a package is outdated by comparing
+`pkgver-pkgrel`, so changing the commit alone produces a recipe that builds
+something new while every installed copy is told it is already up to date.
+That happened three times before the script existed.
+
+It also keeps the commit in the `source=` pin and the one in the `icon=` URL
+in step; a recipe with those out of sync builds the right code and shows a
+404 for its icon. A test in `tests/dist_files.rs` fails if they ever drift.
+
 ### Keeping it current
 
 The recipe pins a commit rather than a tag, because Cookie has no release tag

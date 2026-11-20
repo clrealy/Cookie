@@ -23,6 +23,7 @@ toml = "1"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 dirs = "6"
+libc = "0.2.191"
 
 [profile.release]
 strip = true
